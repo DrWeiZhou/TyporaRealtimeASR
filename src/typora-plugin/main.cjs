@@ -24,7 +24,7 @@ module.exports=function mount(w,config){
  toggle.onclick=()=>{panel.hidden=!panel.hidden};
  d.addEventListener('keydown',e=>{if(e.ctrlKey&&e.altKey&&e.code==='KeyR'){e.preventDefault();panel.hidden=!panel.hidden}});
  const ack=(eventId,state)=>client.request('POST',`/sessions/${session.sessionId}/ack`,{eventId,state});
- function bind(documentId){adapter?.dispose();adapter=new EditorAdapter(w,documentId);controller=new TranscriptController(adapter,ack,adapter.path());$('asr-target').textContent='记录到：'+path.basename(adapter.path());}
+ function bind(documentId){adapter?.dispose();adapter=new EditorAdapter(w,documentId,path.dirname(config.connectionFile));controller=new TranscriptController(adapter,ack,adapter.path());$('asr-target').textContent='记录到：'+path.basename(adapter.path());}
  function remember(documentId){documents[adapter.path().toLowerCase()]={documentId,sessionId:session.sessionId};fs.mkdirSync(path.dirname(stateFile),{recursive:true});const tmp=stateFile+'.'+client.id+'.tmp';fs.writeFileSync(tmp,JSON.stringify(documents,null,2));fs.renameSync(tmp,stateFile);}
  async function refreshDevices(){try{const devices=await client.request('GET','/devices');$('asr-devices').replaceChildren(...devices.map(x=>{const o=d.createElement('option');o.value=x.id;o.textContent=x.name;return o}));}catch(e){showError(e)}}
  async function start(){
@@ -55,7 +55,7 @@ module.exports=function mount(w,config){
     }
     const target=options.find(s=>s.sessionId===id);if(!target)throw new Error('会话不属于当前文档');
     session=await client.request('POST',`/sessions/${id}/recover`,{});bind(target.documentId);
-    if(adapter.anchors().length!==1)throw new Error('原插入标记缺失或重复，请先在文档中恢复原标记');
+    adapter.bind();if(!await adapter.save())throw new Error('请先保存当前文档后恢复');
     after=0;pending.clear();toSave.clear();observed.clear();remember(target.documentId);$('asr-review').replaceChildren();status('正在恢复…');
    }catch(e){showError(e)}finally{busy=false}
  }
@@ -78,7 +78,7 @@ module.exports=function mount(w,config){
     if(pending.size<200){const events=await client.request('GET',`/sessions/${session.sessionId}/events?after=${after}`);for(const e of events){pending.set(e.eventId,e);after=Math.max(after,e.seq)}}
     if(adapter.path()!==adapter.boundPath){status('已切换文档；录音继续，自动入文已暂停。');return;}
     if(!adapter.checkDisk()){status('检测到磁盘内容变化，已暂停补写。请处理文件冲突后重新恢复会话。');return;}
-    if(!adapter.safe()){status('等待中文输入完成或有效插入标记，转写继续保留。');return;}
+    if(!adapter.safe()){status('等待中文输入完成或返回普通编辑模式，转写继续保留。');return;}
     for(const id of observed){if(!adapter.contains(id)){await ack(id,'deleted');observed.delete(id);toSave.delete(id)}}
     for(const [id,event] of pending){
       const result=await controller.apply(event);
@@ -86,7 +86,7 @@ module.exports=function mount(w,config){
       if(result==='review'){review(event);break;}
       pending.delete(id);if(adapter.contains(id)){toSave.set(id,event);observed.add(id);}
     }
-    if(toSave.size && Date.now()-lastSave>1000){
+    if(toSave.size && Date.now()-lastSave>100){
       lastSave=Date.now();
       for(const [id] of toSave){if(!adapter.contains(id)){await ack(id,'deleted');toSave.delete(id)}}
       if(toSave.size && await adapter.save()){for(const [id] of toSave){await ack(id,'saved');toSave.delete(id)}}
@@ -96,7 +96,7 @@ module.exports=function mount(w,config){
  }
  const extra=require('./panel-controls.cjs')(w,config,client,panel,{session:()=>session,pending:()=>pending.size,toSave:()=>toSave.size,status,refreshDevices});
  $('asr-pause').onclick=pause;$('asr-start').onclick=start;$('asr-stop').onclick=stop;$('asr-recover').onclick=()=>recover();
- refreshDevices();const timer=w.setInterval(tick,500);
+ refreshDevices();const timer=w.setInterval(tick,200);
  const api={start,stop,pause,recover,getState:()=>({session,busy,controlBusy,pending:pending.size,toSave:toSave.size,status:lastStatus}),dispose:()=>{w.clearInterval(timer);extra.dispose();adapter?.dispose();panel.remove();toggle.remove();style.remove()}};
  w.typoraRealtimeAsr=api;return api;
 };

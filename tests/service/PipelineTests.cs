@@ -67,6 +67,24 @@ static class PipelineTests {
     var events=db.Events("length-asr",0);if(db.PendingCount("length-asr")!=0||events.Count!=4||events.Any(e=>e.End-e.Start!=16000||e.State!="no_text"))throw new Exception("Truncated jobs were not bounded and preserved as one-second review intervals");
    }
    Console.WriteLine("PASS truncated ASR splits into bounded intervals without losing audio coverage");
+   using var sentenceHttp=new HttpClient(new SentenceAsr());
+   await using(var live=new RecordingSession("live-sentence","d","C:\\test.md",root,db,new AsrClient(sentenceHttp,"http://localhost","test"))){
+    live.Accept(Enumerable.Repeat((short)8000,16000).ToArray());live.Accept(new short[2560]);
+    var deadline=DateTime.UtcNow.AddSeconds(2);while(db.Events("live-sentence",0).Count==0&&DateTime.UtcNow<deadline)await Task.Delay(20);
+    if(db.Events("live-sentence",0).Count!=1||db.ScheduledEnd("live-sentence")!=18560)throw new Exception("Complete sentence missing final or durable recovery boundary");
+    live.Accept(Enumerable.Repeat((short)8000,16000).ToArray());live.Accept(new short[7360]);
+    deadline=DateTime.UtcNow.AddSeconds(2);while(db.Events("live-sentence",0).Count<2&&DateTime.UtcNow<deadline)await Task.Delay(20);
+    var events=db.Events("live-sentence",0);if(events.Count!=2||events[0].End!=events[1].Start)throw new Exception("Sentence commit lost or duplicated following audio");
+   }
+   Console.WriteLine("PASS complete sentence commits at short pause and retains following audio");
+   var heldPreview=new HeldPreviewAsr();using var previewHttp=new HttpClient(heldPreview);
+   await using(var live=new RecordingSession("live-pause","d","C:\\test.md",root,db,new AsrClient(previewHttp,"http://localhost","test"))){
+    live.Accept(Enumerable.Repeat((short)8000,32000).ToArray());await heldPreview.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    live.Accept(new short[7360]);
+    var deadline=DateTime.UtcNow.AddMilliseconds(1500);while(db.Events("live-pause",0).Count==0&&DateTime.UtcNow<deadline)await Task.Delay(20);
+    if(db.Events("live-pause",0).Count!=1||!heldPreview.Cancelled)throw new Exception("Preview blocked final utterance or required stopping recording");
+   }
+   Console.WriteLine("PASS clear pause preempts slow preview and emits final without stop");
    using var asrHttp=new HttpClient();var asr=new AsrClient(asrHttp,"http://127.0.0.1:1","test");
    await using var session=new RecordingSession("pause-test","d","C:\\test.md",root,db,asr);
    session.Accept(Enumerable.Repeat((short)8192,3200).ToArray());
@@ -78,6 +96,16 @@ static class PipelineTests {
    if(session.Paused)throw new Exception("Stop retained paused state");
    Console.WriteLine("PASS pause flushes tail, stops input and clears microphone level");
   }finally{Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();Directory.Delete(root,true);}
+ }
+ sealed class SentenceAsr:HttpMessageHandler {
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"delta\":{\"content\":\"一句完整的话。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")});
+ }
+ sealed class HeldPreviewAsr:HttpMessageHandler {
+  public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously);public bool Cancelled;private int calls;
+  protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token){
+   if(++calls==1){Started.SetResult();try{await Task.Delay(Timeout.Infinite,token);}catch(OperationCanceledException){Cancelled=true;throw;}}
+   return new(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"delta\":{\"content\":\"一句完整的话。\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")};
+  }
  }
  sealed class FakeLlm:HttpMessageHandler {
   public int Calls;

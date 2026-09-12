@@ -1,9 +1,9 @@
 namespace TyporaAsr;
 
-public sealed record AudioSegment(long Start, long End, short[] Samples, bool NeedsReview);
+public sealed record AudioSegment(long Start, long End, short[] Samples, bool NeedsReview, bool EndsWithPause=false);
 
 /// <summary>20 ms energy frames; audio ownership is independent of capture buffers.</summary>
-public sealed class Segmenter(int rate = 16000, int silenceMs = 700, int maxSeconds = 15, double threshold = 0.012)
+public sealed class Segmenter(int rate = 16000, int silenceMs = 450, int maxSeconds = 15, double threshold = 0.012)
 {
     private readonly List<short> active = [];
     private readonly Queue<short> preroll = new();
@@ -11,7 +11,16 @@ public sealed class Segmenter(int rate = 16000, int silenceMs = 700, int maxSeco
     private int quiet;
     private bool speaking, continuation;
     public long? ActiveStart=>speaking?start:null;
-    public AudioSegment? Snapshot() => speaking ? new(start,position,active.ToArray(),continuation) : null;
+    public bool ShortPause=>speaking && quiet>=rate*160/1000;
+    public AudioSegment? Snapshot() => speaking ? new(start,position,active.ToArray(),continuation,ShortPause) : null;
+    public bool CanConfirmSentence(AudioSegment snapshot)=>speaking && !continuation && snapshot.EndsWithPause && start==snapshot.Start && snapshot.End<=position;
+    public bool ConfirmSentence(AudioSegment snapshot){
+        if(!CanConfirmSentence(snapshot))return false;
+        active.RemoveRange(0,checked((int)(snapshot.End-start)));start=snapshot.End;
+        quiet=Math.Min(quiet,active.Count);
+        if(active.Count==0){speaking=false;quiet=0;}
+        return true;
+    }
     public List<AudioSegment> Push(short[] pcm)
     {
         var result = new List<AudioSegment>();

@@ -9,7 +9,7 @@ module.exports=async function(w){
  const source=path.join(root,'src/typora-plugin');for(const file of ['main.cjs','client.cjs','controller.cjs','editor-adapter.cjs','panel-controls.cjs','service-launcher.cjs']){const resolved=w.reqnode.resolve(path.join(source,file));delete w.reqnode.cache[resolved];}
  w.reqnode(path.join(source,'main.cjs'))(w,{connectionFile:path.join(root,'artifacts/feature-test/connection.json')});
  const {EditorAdapter}=w.reqnode(path.join(root,'src/typora-plugin/editor-adapter.cjs'));
- const adapter=new EditorAdapter(w,fixture.documentId);adapter.transaction(adapter.anchors()[0],[{type:'paragraph',text:'人工未保存改写必须保留'}]);
+ const adapter=new EditorAdapter(w,fixture.documentId);adapter.transaction(adapter.e.nodeMap.getLast(),[{type:'paragraph',text:'人工未保存改写必须保留'}],false);
  for(let attempt=0;attempt<16;attempt++){await w.typoraRealtimeAsr.recover(fixture.sessionId);if(w.typoraRealtimeAsr.getState().session?.sessionId===fixture.sessionId)break;await wait(1000);}
  for(let i=0;i<60;i++){await wait(250);if(w.File.editor.getMarkdown().includes('已润色的第二句话。')&&w.typoraRealtimeAsr.getState().toSave===0&&fs.readFileSync(target,'utf8')===w.File.editor.getMarkdown())break;}
  const first=w.File.editor.getMarkdown(),disk=fs.readFileSync(target,'utf8');

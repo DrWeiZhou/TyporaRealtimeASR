@@ -41,3 +41,8 @@ test('an interrupted insertion intent is reviewed instead of replayed automatica
  const s=setup();assert.equal(await s.controller.apply({eventId:'e1',text:'未知是否写入',state:'applying'}),'review');
  assert.equal(s.content,'人工修改过的内容\n');
 });
+
+test('saved events never reappear after users edit or delete marker-free text',async()=>{
+ const s=setup();assert.equal(await s.controller.apply({eventId:'saved',text:'旧文字',state:'saved'}),'handled');
+ assert.equal(s.content,'人工修改过的内容\n');assert.equal(s.acknowledgements.length,0);
+});

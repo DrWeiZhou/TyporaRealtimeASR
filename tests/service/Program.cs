@@ -22,6 +22,11 @@ Check("Normally finished empty ASR result is distinct from an interrupted stream
  var empty=new AsrOutput();empty.Add("language Chinese<asr_text>","stop");Equal("",empty.FinalText());
  var interrupted=new AsrOutput();interrupted.Add("");try{interrupted.FinalText();throw new Exception("Accepted unfinished stream");}catch(InvalidDataException){}
 });
+Check("Default VAD emits during a clear pause before recording stops",()=>{
+ var vad=new Segmenter();vad.Push(Enumerable.Repeat((short)5000,16000).ToArray());
+ Equal(0,vad.Push(new short[3200]).Count);
+ Equal(1,vad.Push(new short[4160]).Count);
+});
 Check("VAD silence produces no speech and endpoint includes tail", () => {
     var vad = new Segmenter(16000,700,15,0.01);
     Equal(0,vad.Push(new short[16000]).Count);

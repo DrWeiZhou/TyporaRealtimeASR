@@ -16,6 +16,7 @@ public sealed class RecordingSession : IAsyncDisposable
     private MMDevice? endpoint;
     private PcmConverter? converter;
     private AudioSegment? preview;
+    private CancellationTokenSource? previewCancellation;
     private long lastPreview;
     private int revision;
     private volatile bool recording;
@@ -80,10 +81,10 @@ public sealed class RecordingSession : IAsyncDisposable
             ledger.EndSpan(Id,audio.Samples);
             foreach(var segment in segmenter.Push(pcm)) Enqueue(segment);
             ledger.SetProgress(Id,segmenter.ActiveStart ?? audio.Samples);
-            if(audio.Samples-lastPreview>=32000) {preview=segmenter.Snapshot();lastPreview=audio.Samples;}
+            if(audio.Samples-lastPreview>=32000 || segmenter.ShortPause) {preview=segmenter.Snapshot();lastPreview=audio.Samples;}
         }
     }
-    private void Enqueue(AudioSegment s) {ledger.AddJob(Id,$"{Id}:{s.Start}",s.Start,s.End,s.NeedsReview);preview=null;Hypothesis=null;}
+    private void Enqueue(AudioSegment s) {ledger.AddJob(Id,$"{Id}:{s.Start}",s.Start,s.End,s.NeedsReview);preview=null;Hypothesis=null;previewCancellation?.Cancel();}
     private void FinalizeTail(bool close=true){var tail=segmenter.Flush();if(tail!=null)Enqueue(tail);ledger.SetProgress(Id,audio.Samples);ledger.EndSpan(Id,audio.Samples);preview=null;Hypothesis=null;if(close)inputClosed=true;}
     public Task Pause()=>StopCapture(true);
     public Task Stop()=>StopCapture(false);
@@ -107,21 +108,32 @@ public sealed class RecordingSession : IAsyncDisposable
                 processing=true;
                 using var timeout=CancellationTokenSource.CreateLinkedTokenSource(cancel.Token);timeout.CancelAfter(TimeSpan.FromSeconds(90));
                 try {
+                    if(job.Id==null)lock(gate){previewCancellation=timeout;if(ledger.PendingCount(Id)>0)timeout.Cancel();}
                     var text=await asr.Recognize(job.Id!=null?audio.Read(job.Start,job.End):snap!.Samples,timeout.Token);
                     if(job.Id!=null){ledger.AddFinal(Id,job.Id,job.Start,job.End,text,job.Review);Hypothesis=null;}
                     else lock(gate) {
                         // A result for a finalized segment must never resurrect its preview.
                         var current=segmenter.Snapshot();
-                        if(current?.Start==snap!.Start)Hypothesis=new {segmentId=$"{Id}:{snap.Start}",revision=++revision,text,end=snap.End};
+                        if(current?.Start==snap!.Start){
+                            if(System.Text.RegularExpressions.Regex.IsMatch(text,"[。！？!?][\\\"'”’）)]*$") && segmenter.CanConfirmSentence(snap)){
+                                // Persist ownership before consuming memory; failure/restart retains an exact job.
+                                ledger.AddJob(Id,$"{Id}:{snap.Start}",snap.Start,snap.End,false);
+                                segmenter.ConfirmSentence(snap);
+                                ledger.AddFinal(Id,$"{Id}:{snap.Start}",snap.Start,snap.End,text,false);
+                                ledger.SetProgress(Id,segmenter.ActiveStart??audio.Samples);preview=null;Hypothesis=null;
+                            }else Hypothesis=new {segmentId=$"{Id}:{snap.Start}",revision=++revision,text,end=snap.End};
+                        }
                     }
                     Error="";
+                } catch(OperationCanceledException) when(job.Id==null && !cancel.IsCancellationRequested && ledger.PendingCount(Id)>0) {
+                    // A completed utterance preempts speculative previews without retry delay.
                 } catch(InvalidDataException e) when(!cancel.IsCancellationRequested && Equals(e.Data["FinishReason"],"length")) {
                     if(job.Id!=null){if(job.End-job.Start>=32000)ledger.SplitJob(Id,job.Id,job.Start,job.End);else ledger.AddFinal(Id,job.Id,job.Start,job.End,"",true);}
                     Hypothesis=null;Error="";
                 } catch(Exception e) when(!cancel.IsCancellationRequested) {
                     Error=e.Message;if(job.Id!=null)ledger.FailJob(job.Id,e.Message);
                     await Task.Delay(2000,cancel.Token);
-                } finally {processing=false;}
+                } finally {lock(gate){previewCancellation=null;}processing=false;}
             } catch(OperationCanceledException) when(cancel.IsCancellationRequested){break;}
             catch(Exception e){Error=e.Message;await Task.Delay(1000);}
         }
