@@ -21,6 +21,12 @@ public sealed class RecordingSession : IAsyncDisposable
     private volatile bool recording;
     private volatile bool processing;
     private volatile bool inputClosed;
+    private volatile bool paused;
+    private bool pausing;
+    private readonly SemaphoreSlim lifecycle=new(1,1);
+    public bool Paused=>paused;
+    public double Rms {get;private set;}
+    public double Peak {get;private set;}
     private string captureError="";
     private TaskCompletionSource stopped=new(TaskCreationOptions.RunContinuationsAsynchronously);
     public string Id {get;}
@@ -43,7 +49,10 @@ public sealed class RecordingSession : IAsyncDisposable
     }
     public void Start(int device) {
         lock(gate) {
-            if(capture!=null || audio.Samples!=0)throw new InvalidOperationException("A recording cannot be started twice; create a new session.");
+            if(capture!=null || inputClosed || (audio.Samples!=0 && !paused))throw new InvalidOperationException("会话已经结束或正在录音");
+            var wasPaused=paused;paused=false;pausing=false;captureError="";
+            try {
+            stopped=new(TaskCreationOptions.RunContinuationsAsynchronously);
             using var enumerator=new MMDeviceEnumerator();
             endpoint=device<0?enumerator.GetDefaultAudioEndpoint(DataFlow.Capture,Role.Console):enumerator.EnumerateAudioEndPoints(DataFlow.Capture,DeviceState.Active)[device];
             capture=new WasapiCapture(endpoint);
@@ -53,29 +62,40 @@ public sealed class RecordingSession : IAsyncDisposable
                 catch(Exception error) {captureError="录音保存失败: "+error.Message;capture?.StopRecording();}
             };
             capture.RecordingStopped+=(_,e)=>{
-                lock(gate) {recording=false;try{if(e.Exception!=null)captureError=e.Exception.Message;Accept(converter.Flush());FinalizeTail();stopped.TrySetResult();}catch(Exception error){captureError=error.Message;stopped.TrySetException(error);}}
+                lock(gate) {recording=false;try{if(e.Exception!=null)captureError="麦克风采集停止，请结束会话并检查设备";Accept(converter.Flush());FinalizeTail(!pausing || e.Exception!=null);paused=pausing && !inputClosed;Rms=Peak=0;stopped.TrySetResult();}catch(Exception error){captureError=error.Message;inputClosed=true;paused=false;Rms=Peak=0;stopped.TrySetException(error);}}
             };
+            ledger.BeginSpan(Id,audio.Samples,DateTimeOffset.Now);
             recording=true;
-            try {capture.StartRecording();} catch {recording=false;capture.Dispose();capture=null;endpoint.Dispose();endpoint=null;throw;}
+            capture.StartRecording();
+            } catch {recording=false;paused=wasPaused;capture?.Dispose();capture=null;endpoint?.Dispose();endpoint=null;throw;}
         }
     }
     public void Accept(short[] pcm) {
         lock(gate) {
-            if(inputClosed)throw new InvalidOperationException("Recording input is closed");
+            if(inputClosed || paused)throw new InvalidOperationException("Recording input is closed or paused");
+            if(pcm.Length==0)return;
+            double sum=0,peak=0;foreach(var value in pcm){double x=value/32768.0;sum+=x*x;peak=Math.Max(peak,Math.Abs(x));}Rms=Math.Sqrt(sum/pcm.Length);Peak=peak;
             audio.Append(pcm);
+            ledger.EndSpan(Id,audio.Samples);
             foreach(var segment in segmenter.Push(pcm)) Enqueue(segment);
             ledger.SetProgress(Id,segmenter.ActiveStart ?? audio.Samples);
             if(audio.Samples-lastPreview>=32000) {preview=segmenter.Snapshot();lastPreview=audio.Samples;}
         }
     }
     private void Enqueue(AudioSegment s) {ledger.AddJob(Id,$"{Id}:{s.Start}",s.Start,s.End,s.NeedsReview);preview=null;Hypothesis=null;}
-    private void FinalizeTail(){var tail=segmenter.Flush();if(tail!=null)Enqueue(tail);ledger.SetProgress(Id,audio.Samples);preview=null;inputClosed=true;}
-    public async Task Stop() {
-        WasapiCapture? device;lock(gate)device=capture;
-        if(device!=null && recording){device.StopRecording();await stopped.Task.WaitAsync(TimeSpan.FromSeconds(10));device.Dispose();lock(gate){capture=null;endpoint?.Dispose();endpoint=null;}}
-        else lock(gate)FinalizeTail();
+    private void FinalizeTail(bool close=true){var tail=segmenter.Flush();if(tail!=null)Enqueue(tail);ledger.SetProgress(Id,audio.Samples);ledger.EndSpan(Id,audio.Samples);preview=null;Hypothesis=null;if(close)inputClosed=true;}
+    public Task Pause()=>StopCapture(true);
+    public Task Stop()=>StopCapture(false);
+    public async Task Resume(int device){await lifecycle.WaitAsync();try{if(!paused)throw new InvalidOperationException("会话未暂停，不能续录");Start(device);}finally{lifecycle.Release();}}
+    private async Task StopCapture(bool pause) {
+        await lifecycle.WaitAsync();try{
+            WasapiCapture? device;lock(gate){if(inputClosed){if(pause)throw new InvalidOperationException("录音已结束");return;}if(pause && paused)return;pausing=pause;device=capture;}
+            if(device!=null && recording){device.StopRecording();await stopped.Task.WaitAsync(TimeSpan.FromSeconds(10));}
+            else lock(gate){FinalizeTail(!pause);paused=pause;}
+            lock(gate){capture?.Dispose();capture=null;endpoint?.Dispose();endpoint=null;Rms=Peak=0;if(!pause){inputClosed=true;paused=false;}}
+        }finally{lifecycle.Release();}
     }
-    public object Status()=>new {sessionId=Id,documentId=DocumentId,path=Path,recording,processing,samples=audio.Samples,seconds=audio.Samples/16000.0,pending=ledger.PendingCount(Id),error=captureError.Length>0?captureError:Error,hypothesis=Hypothesis};
+    public object Status()=>new {sessionId=Id,documentId=DocumentId,path=Path,recording,paused,processing,ended=inputClosed,rms=Rms,peak=Peak,audioSavedSamples=audio.Samples,samples=audio.Samples,seconds=audio.Samples/16000.0,pending=ledger.PendingCount(Id),polish=ledger.PolishStatus(Id),error=captureError.Length>0?captureError:Error,hypothesis=Hypothesis};
     private async Task Work() {
         while(!cancel.IsCancellationRequested) {
             try {

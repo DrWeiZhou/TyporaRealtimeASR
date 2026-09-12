@@ -2,8 +2,8 @@ using Microsoft.Data.Sqlite;
 
 namespace TyporaAsr;
 
-public sealed record TranscriptEvent(long Seq,string EventId,string SessionId,long Start,long End,string Text,bool NeedsReview,string State);
-public sealed class Ledger : IDisposable
+public sealed record TranscriptEvent(long Seq,string EventId,string SessionId,long Start,long End,string Text,bool NeedsReview,string State,string PolishState="ready");
+public sealed partial class Ledger : IDisposable
 {
     private readonly SqliteConnection db;
     private readonly object gate = new();
@@ -12,6 +12,7 @@ public sealed class Ledger : IDisposable
         db=new SqliteConnection(new SqliteConnectionStringBuilder { DataSource=Path.Combine(root,"events.sqlite3") }.ToString()); db.Open();
         Execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,document TEXT,path TEXT); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,session TEXT,start INTEGER,end INTEGER,text TEXT,review INTEGER,state TEXT); CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,session TEXT,start INTEGER,end INTEGER,review INTEGER,state TEXT,error TEXT);");
         Execute("CREATE TABLE IF NOT EXISTS progress(session TEXT PRIMARY KEY,sample INTEGER)");
+        InitializePipeline(root);
     }
     private int Execute(string sql, params object[] values) {
         lock(gate) { using var c=db.CreateCommand(); c.CommandText=sql; for(var i=0;i<values.Length;i++) c.Parameters.AddWithValue("$"+i,values[i]); return c.ExecuteNonQuery(); }
@@ -26,6 +27,7 @@ public sealed class Ledger : IDisposable
             c.CommandText="INSERT OR IGNORE INTO events(id,session,start,end,text,review,state) VALUES($0,$1,$2,$3,$4,$5,'recognized'); UPDATE jobs SET state='done',error='' WHERE id=$0;";
             object[] values=[id,session,start,end,text,review?1:0]; for(var i=0;i<values.Length;i++) c.Parameters.AddWithValue("$"+i,values[i]);
             c.ExecuteNonQuery(); transaction.Commit();
+            ExportTranscript(session);
         }
     }
     public void Acknowledge(string session,string id,string state) {

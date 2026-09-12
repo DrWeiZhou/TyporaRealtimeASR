@@ -12,7 +12,7 @@ class ServiceClient {
         let text='';res.setEncoding('utf8');res.on('data',x=>{text+=x;if(text.length>2e6)res.destroy(new Error('响应过大'));});
         res.on('error',reject);res.on('end',()=>{try{const value=text?JSON.parse(text):null;res.statusCode>=200&&res.statusCode<300?resolve(value):reject(new Error(value?.error||`服务返回 ${res.statusCode}`));}catch(e){reject(e)}});
       });
-      req.on('error',reject);req.setTimeout(100000,()=>req.destroy(new Error('本地服务响应超时')));if(data)req.write(data);req.end();
+      req.on('error',reject);req.setTimeout(route.includes('health')?5000:100000,()=>req.destroy(new Error('本地服务响应超时')));if(data)req.write(data);req.end();
     });
   }
 }

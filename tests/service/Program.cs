@@ -95,6 +95,22 @@ if(args.Contains("--capture")){
   Console.WriteLine($"PASS WASAPI microphone capture: {received} bytes, {capture.WaveFormat}");
  }catch(Exception e){failures++;Console.WriteLine("FAIL WASAPI microphone capture: "+e);}
 }
+if(args.Contains("--pause-capture")){
+ var root=Path.Combine(Path.GetTempPath(),"asr-pause-capture-"+Guid.NewGuid());Directory.CreateDirectory(root);
+ try{using var db=new Ledger(root);using var http=new HttpClient();var asr=new AsrClient(http,"http://127.0.0.1:1","test");
+ await using var s=new RecordingSession("capture-pause","d","C:\\test.md",root,db,asr);
+ s.Start(-1);await Task.Delay(1200);await s.Pause();var first=System.Text.Json.JsonSerializer.SerializeToElement(s.Status());var count=first.GetProperty("samples").GetInt64();
+ if(count<8000||!s.Paused||s.Rms!=0)throw new Exception("Initial capture/pause failed");
+ await Task.Delay(500);if(System.Text.Json.JsonSerializer.SerializeToElement(s.Status()).GetProperty("samples").GetInt64()!=count)throw new Exception("Pause kept recording");
+ try{await s.Resume(int.MaxValue);throw new Exception("Invalid device unexpectedly accepted");}catch(ArgumentException){}catch(IndexOutOfRangeException){}
+ if(!s.Paused)throw new Exception("Failed resume lost paused state");
+ for(var i=0;i<2;i++){await s.Resume(-1);await Task.Delay(900);await s.Pause();}
+ await s.Stop();var last=System.Text.Json.JsonSerializer.SerializeToElement(s.Status());
+ if(last.GetProperty("samples").GetInt64()<=count+16000||s.Paused||s.Recording)throw new Exception("Resume did not append audio");
+ Console.WriteLine("PASS actual WASAPI: two resumes, fixed samples during pause, invalid-device retry and final stop");
+ }catch(Exception e){failures++;Console.WriteLine("FAIL pause capture: "+e);}
+ finally{Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();Directory.Delete(root,true);}
+}
 if(args.Length==5 && args[0]=="--editor-integration") {
  using var ledger=new Ledger(args[2]);using var http=new HttpClient();var client=new AsrClient(http,"http://127.0.0.1:18081","qwen3-asr");
  var id=Guid.NewGuid().ToString();
@@ -106,4 +122,14 @@ if(args.Length==5 && args[0]=="--editor-integration") {
  File.WriteAllText(System.IO.Path.Combine(args[2],"integration-session.json"),System.Text.Json.JsonSerializer.Serialize(new {sessionId=id,documentId=args[4],events=ledger.Events(id,0).Count}));
  Console.WriteLine("PASS persisted real-model fixture for editor integration");
 }
+if(args.Length==3 && args[0]=="--seed-polish-fixture"){
+ Directory.CreateDirectory(args[1]);using var db=new Ledger(args[1]);var session=Guid.NewGuid().ToString();var doc=Guid.NewGuid().ToString();
+ File.WriteAllText(args[2],$"# 润色集成测试\n\n人工笔记起始内容\n\n<!-- asr-insert:{doc} -->\n");db.CreateSession(session,doc,Path.GetFullPath(args[2]));db.EnablePolish(session);
+ db.BeginSpan(session,0,DateTimeOffset.Parse("2026-09-12T10:00:00+08:00"));db.EndSpan(session,32000);
+ db.AddFinal(session,session+":0",0,16000,"原始口语一",false);db.AddFinal(session,session+":16000",16000,32000,"原始口语二",false);
+ foreach(var e in db.Events(session,0)){db.SnapshotPolish(e.EventId,"fixture-only");db.CompletePolish(e.EventId,e.Start==0?"已润色的第一句话。":"已润色的第二句话。");}
+ db.AddFinal(session,session+":32000",32000,48000,"不能入文的未润色原始内容",false);
+ File.WriteAllText(Path.Combine(args[1],"integration-session.json"),System.Text.Json.JsonSerializer.Serialize(new {sessionId=session,documentId=doc}));Console.WriteLine("PASS prepared isolated editor fixture");
+}
+try {await PipelineTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL pipeline: "+e);}
 Environment.ExitCode = failures == 0 ? 0 : 1;

@@ -42,7 +42,8 @@ class EditorAdapter {
     if(!this.safe())throw new Error('编辑状态改变，等待安全插入');
     if(!/^[a-zA-Z0-9:_-]+$/.test(event.eventId))throw new Error('Invalid event id');
     const seconds=Math.floor((event.start||0)/16000);
-    const time=[Math.floor(seconds/3600),Math.floor(seconds/60)%60,seconds%60].map(x=>String(x).padStart(2,'0')).join(':');
+    const format=s=>[Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(x=>String(x).padStart(2,'0')).join(':');
+    const time=format(seconds)+'–'+format(Math.floor((event.end??event.start??0)/16000));
     this.transaction(this.anchors()[0],[{type:'html_block',text:`<!-- asr-event:${event.eventId} -->`},{type:'paragraph',text:`\\[${time}\\] ${escapeText(event.text)}`}]);
   }
   checkDisk() {

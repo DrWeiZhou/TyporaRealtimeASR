@@ -6,6 +6,10 @@ function setup(){
   const adapter={path:()=>'/notes.md',safe:()=>true,contains:id=>content.includes(id),insert:e=>{content+=`${e.eventId}:${e.text}\n`;}};
   return {adapter,acknowledgements,get content(){return content},controller:new TranscriptController(adapter,(id,state)=>acknowledgements.push([id,state]),'/notes.md')};
 }
+test('unpolished text cannot enter the document even with review approval',async()=>{
+ const s=setup();assert.equal(await s.controller.apply({eventId:'raw',text:'原始口语',polishState:'pending'},true),'deferred');
+ assert.equal(s.acknowledgements.length,0);
+});
 test('duplicate final never overwrites edited history or inserts twice',async()=>{
   const s=setup(),e={eventId:'e1',text:'新一句',state:'recognized'};
   await s.controller.apply(e);await s.controller.apply(e);

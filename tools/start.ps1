@@ -1,6 +1,11 @@
 ﻿param([switch]$SkipModel)
 $ErrorActionPreference='Stop'
 $projectRoot=Split-Path $PSScriptRoot -Parent
+$startMutex=[Threading.Mutex]::new($false,'Local\TyporaRealtimeASR-Startup')
+$ownsMutex=$false
+try {
+try {$ownsMutex=$startMutex.WaitOne(0)} catch [Threading.AbandonedMutexException] {$ownsMutex=$true}
+if(!$ownsMutex){throw '另一窗口正在启动服务，请稍后检查服务状态'}
 $configPath=Join-Path $projectRoot 'config.local.json'
 if(!(Test-Path $configPath)){throw '请将 config.example.json 复制为 config.local.json 并填写现有模型路径'}
 $cfg=Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
@@ -43,3 +48,5 @@ for($attempt=0;$attempt -lt 30;$attempt++){
     try{$conn=Get-Content $connectionPath -Raw | ConvertFrom-Json;if((Invoke-RestMethod ($conn.endpoint+'/health') -Headers @{Authorization=('Bearer '+$conn.token)} -TimeoutSec 1).status -eq 'ok'){Write-Host '本地模型与转写服务就绪。请在 Typora 面板点击开始录音。';exit}}catch{}
 }
 throw '服务启动失败，请查看 artifacts/service.stderr.log'
+
+} finally {if($ownsMutex){$startMutex.ReleaseMutex()};$startMutex.Dispose()}
