@@ -102,7 +102,8 @@ if(args.Contains("--capture")){
 if(args.Contains("--pause-capture")){
  var root=Path.Combine(Path.GetTempPath(),"asr-pause-capture-"+Guid.NewGuid());Directory.CreateDirectory(root);
  try{using var db=new Ledger(root);using var http=new HttpClient();var asr=new AsrClient(http,"http://127.0.0.1:1","test");
- await using var s=new RecordingSession("capture-pause","d","C:\\test.md",root,db,asr);
+ var captureId=Guid.NewGuid().ToString();var captureDoc=Path.Combine(root,"note.md");File.WriteAllText(captureDoc,"# Capture test");
+ await using var s=new RecordingSession(captureId,"d",captureDoc,root,db,asr);
  s.Start(-1);await Task.Delay(1200);await s.Pause();var first=System.Text.Json.JsonSerializer.SerializeToElement(s.Status());var count=first.GetProperty("samples").GetInt64();
  if(count<8000||!s.Paused||s.Rms!=0)throw new Exception("Initial capture/pause failed");
  await Task.Delay(500);if(System.Text.Json.JsonSerializer.SerializeToElement(s.Status()).GetProperty("samples").GetInt64()!=count)throw new Exception("Pause kept recording");
@@ -111,7 +112,8 @@ if(args.Contains("--pause-capture")){
  for(var i=0;i<2;i++){await s.Resume(-1);await Task.Delay(900);await s.Pause();}
  await s.Stop();var last=System.Text.Json.JsonSerializer.SerializeToElement(s.Status());
  if(last.GetProperty("samples").GetInt64()<=count+16000||s.Paused||s.Recording)throw new Exception("Resume did not append audio");
- Console.WriteLine("PASS actual WASAPI: two resumes, fixed samples during pause, invalid-device retry and final stop");
+ using var wavStream=new FileStream(SessionFiles.Paths(root,captureId,captureDoc).Audio,FileMode.Open,FileAccess.Read,FileShare.ReadWrite);using var wavReader=new WaveFileReader(wavStream);if(wavReader.Length!=last.GetProperty("samples").GetInt64()*2)throw new Exception("WAV header length does not match captured samples");
+ Console.WriteLine("PASS actual WASAPI WAV: two resumes, fixed samples during pause, invalid-device retry and final header");
  }catch(Exception e){failures++;Console.WriteLine("FAIL pause capture: "+e);}
  finally{Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();Directory.Delete(root,true);}
 }
@@ -136,4 +138,5 @@ if(args.Length==3 && args[0]=="--seed-polish-fixture"){
  File.WriteAllText(Path.Combine(args[1],"integration-session.json"),System.Text.Json.JsonSerializer.Serialize(new {sessionId=session,documentId=doc}));Console.WriteLine("PASS prepared isolated editor fixture");
 }
 try {await PipelineTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL pipeline: "+e);}
+try {await WavTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL WAV: "+e.Message);}
 Environment.ExitCode = failures == 0 ? 0 : 1;

@@ -18,3 +18,4 @@ config.local.json
 __pycache__/
 *.pyc
 /examples/记录.md
+*.逐字稿-*.md

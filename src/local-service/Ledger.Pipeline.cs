@@ -4,9 +4,9 @@ using System.Text.Json;
 namespace TyporaAsr;
 public sealed record PolishJob(string Id,string Session,string Text,string? Config,int Attempts);
 public sealed partial class Ledger {
- private string transcriptRoot="";
+ private string storageRoot="";
  private void InitializePipeline(string root){
-  transcriptRoot=Path.Combine(root,"transcripts");Directory.CreateDirectory(transcriptRoot);
+  storageRoot=root;
   Execute("CREATE TABLE IF NOT EXISTS polish_sessions(session TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS polish(id TEXT PRIMARY KEY,config TEXT,result TEXT,attempts INTEGER NOT NULL DEFAULT 0,next INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS spans(session TEXT,start INTEGER,end INTEGER,wall TEXT,PRIMARY KEY(session,start));");
  }
  public void EnablePolish(string session)=>Execute("INSERT OR IGNORE INTO polish_sessions VALUES($0)",session);
@@ -25,5 +25,5 @@ public sealed partial class Ledger {
  private string? Wall(string session,long sample){using var c=db.CreateCommand();c.CommandText="SELECT start,wall FROM spans WHERE session=$0 AND start<=$1 AND end>=$1 ORDER BY start DESC LIMIT 1";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",sample);using var r=c.ExecuteReader();return r.Read()?DateTimeOffset.Parse(r.GetString(1)).AddSeconds((sample-r.GetInt64(0))/16000.0).ToString("yyyy-MM-dd HH:mm:ss zzz"):null;}
  public static string Offset(long samples){var seconds=samples/16000;return $"{seconds/3600:00}:{seconds/60%60:00}:{seconds%60:00}";}
  public string Transcript(string session){lock(gate){var b=new StringBuilder("# 原始逐字稿\n\n以下为本地 ASR 原始结果，未经在线润色。时间为有效录音偏移；实际时间包含时区，暂停间隔不计入录音偏移。\n\n");long after=0;while(true){var list=Events(session,after);if(list.Count==0)break;foreach(var e in list){b.AppendLine($"## [{Offset(e.Start)}–{Offset(e.End)}] {Wall(session,e.Start)??"历史实际时间未知"}");b.AppendLine();b.AppendLine((e.State=="no_text"?"[识别状态：模型未返回文字或输出持续截断；原始音频已保留，请按时间核对。]":e.Text).Replace("\r"," ").Replace("\n"," "));b.AppendLine();after=e.Seq;}}return b.ToString();}}
- private void ExportTranscript(string session){if(!Guid.TryParse(session,out _))return;var file=Path.Combine(transcriptRoot,session+".md");File.WriteAllText(file+".tmp",Transcript(session));File.Move(file+".tmp",file,true);}
+ public void ExportTranscript(string session){if(!Guid.TryParse(session,out _))return;var stored=Session(session);if(stored==null)return;var file=SessionFiles.Paths(storageRoot,session,stored.Value.Path).Transcript;Directory.CreateDirectory(Path.GetDirectoryName(file)!);File.WriteAllText(file+".tmp",Transcript(session));File.Move(file+".tmp",file,true);}
 }

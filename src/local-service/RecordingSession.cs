@@ -38,7 +38,8 @@ public sealed class RecordingSession : IAsyncDisposable
     public RecordingSession(string id,string document,string path,string root,Ledger ledger,AsrClient asr,bool recover=false) {
         Id=id;DocumentId=document;Path=path;this.ledger=ledger;this.asr=asr;
         ledger.CreateSession(id,document,path);
-        audio=new AudioStore(System.IO.Path.Combine(root,"audio",id+".pcm"));
+        audio=new AudioStore(SessionFiles.PrepareAudio(root,id,path));
+        try{ledger.ExportTranscript(id);}catch{audio.Dispose();throw;}
         if(recover) {
             var end=Math.Max(ledger.ScheduledEnd(id),ledger.Progress(id));
             // Audio written before a crash but not scheduled: bounded, explicitly reviewable recovery chunks.
