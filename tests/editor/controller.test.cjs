@@ -46,3 +46,9 @@ test('saved events never reappear after users edit or delete marker-free text',a
  const s=setup();assert.equal(await s.controller.apply({eventId:'saved',text:'旧文字',state:'saved'}),'handled');
  assert.equal(s.content,'人工修改过的内容\n');assert.equal(s.acknowledgements.length,0);
 });
+
+test('failed polish is reported without inserting raw text and later ready text proceeds',async()=>{
+ const s=setup();assert.equal(await s.controller.apply({eventId:'bad',text:'原始口语',polishState:'failed'}),'failed');
+ assert.equal(await s.controller.apply({eventId:'good',text:'后续润色稿',polishState:'ready'}),'inserted');
+ assert.ok(!s.content.includes('原始口语'));assert.ok(s.content.includes('后续润色稿'));
+});

@@ -9,7 +9,7 @@ module.exports=function mount(w,config){
  const client=new ServiceClient(w,config.connectionFile);
  const stateFile=path.join(path.dirname(config.connectionFile),'plugin-documents.json');
  let documents={};try{documents=JSON.parse(fs.readFileSync(stateFile,'utf8'))}catch{}
- let adapter,controller,session,busy=false,controlBusy=false,controlRevision=0,after=0,lastSave=0,lastStatus='',pending=new Map(),toSave=new Map(),observed=new Set();
+ let adapter,controller,session,busy=false,controlBusy=false,controlRevision=0,replayRevision=0,after=0,lastSave=0,lastStatus='',pending=new Map(),toSave=new Map(),observed=new Set();
  const style=d.createElement('style');style.textContent=`
  #asr-toggle{position:fixed;right:22px;bottom:24px;z-index:9999;border:0;border-radius:24px;padding:12px 18px;background:#235c4b;color:white;box-shadow:0 3px 16px #0003;cursor:pointer}
  #asr-panel{position:fixed;right:20px;top:70px;width:340px;max-height:78vh;overflow:auto;z-index:9998;background:var(--bg-color,#fff);color:var(--text-color,#222);border:1px solid #8885;border-radius:14px;padding:20px;box-shadow:0 8px 35px #0002;font-family:system-ui,sans-serif;font-size:14px}
@@ -23,6 +23,7 @@ module.exports=function mount(w,config){
  const showError=e=>status(e.message||String(e));
  toggle.onclick=()=>{panel.hidden=!panel.hidden};
  d.addEventListener('keydown',e=>{if(e.ctrlKey&&e.altKey&&e.code==='KeyR'){e.preventDefault();panel.hidden=!panel.hidden}});
+ const awaitingPolish=s=>Math.max(0,(s?.polish?.pending||0)-(s?.polish?.failed||0));
  const ack=(eventId,state)=>client.request('POST',`/sessions/${session.sessionId}/ack`,{eventId,state});
  function bind(documentId){adapter?.dispose();adapter=new EditorAdapter(w,documentId,path.dirname(config.connectionFile));controller=new TranscriptController(adapter,ack,adapter.path());$('asr-target').textContent='记录到：'+path.basename(adapter.path());}
  function remember(documentId){documents[adapter.path().toLowerCase()]={documentId,sessionId:session.sessionId};fs.mkdirSync(path.dirname(stateFile),{recursive:true});const tmp=stateFile+'.'+client.id+'.tmp';fs.writeFileSync(tmp,JSON.stringify(documents,null,2));fs.renameSync(tmp,stateFile);}
@@ -30,7 +31,7 @@ module.exports=function mount(w,config){
  async function start(){
   if(busy||controlBusy)return;busy=true;$('asr-start').disabled=true;
   try {
-   if(session?.recording||session?.paused||session?.polish?.pending||pending.size||toSave.size)throw new Error('请先处理上一会话的待写入或未保存内容');
+   if(session?.recording||session?.paused||awaitingPolish(session)||pending.size||toSave.size)throw new Error('请先处理上一会话的待写入或未保存内容');
    const file=w.File.bundle?.filePath;if(!file)throw new Error('请先保存 Markdown 文档');
    const documentId=documents[file.toLowerCase()]?.documentId||crypto.randomUUID();bind(documentId);adapter.bind();
    if(!await adapter.save())throw new Error('插入位置尚未保存，请回到 Typora 并保存文档后重试');
@@ -72,16 +73,17 @@ module.exports=function mount(w,config){
    try {
     const revision=controlRevision,id=session.sessionId;const fresh=await client.request('GET',`/sessions/${id}`);
     if(revision!==controlRevision||id!==session.sessionId)return;session=fresh;
-    $('asr-stop').disabled=!(session.recording||session.paused);$('asr-pause').disabled=!(session.recording||session.paused);$('asr-pause').textContent=session.paused?'继续录音':'暂停';$('asr-start').disabled=session.recording||session.paused||session.pending>0||session.polish?.pending>0||pending.size>0||toSave.size>0;extra.render(session,pending.size,toSave.size);
+    $('asr-stop').disabled=!(session.recording||session.paused);$('asr-pause').disabled=!(session.recording||session.paused);$('asr-pause').textContent=session.paused?'继续录音':'暂停';$('asr-start').disabled=session.recording||session.paused||session.pending>0||awaitingPolish(session)>0||pending.size>0||toSave.size>0;extra.render(session,pending.size,toSave.size);
     if(session.hypothesis)$('asr-preview').textContent=session.hypothesis.text;
     else $('asr-preview').textContent=session.paused?'已暂停。识别与润色继续处理已有音频。':session.recording?'等待当前句识别…':'录音已结束。';
-    if(pending.size<200){const events=await client.request('GET',`/sessions/${session.sessionId}/events?after=${after}`);for(const e of events){pending.set(e.eventId,e);after=Math.max(after,e.seq)}}
+    if(pending.size<200){const revision=replayRevision;const events=await client.request('GET',`/sessions/${session.sessionId}/events?after=${after}`);if(revision!==replayRevision)return;for(const e of events){pending.set(e.eventId,e);after=Math.max(after,e.seq)}}
     if(adapter.path()!==adapter.boundPath){status('已切换文档；录音继续，自动入文已暂停。');return;}
     if(!adapter.checkDisk()){status('检测到磁盘内容变化，已暂停补写。请处理文件冲突后重新恢复会话。');return;}
     if(!adapter.safe()){status('等待中文输入完成或返回普通编辑模式，转写继续保留。');return;}
     for(const id of observed){if(!adapter.contains(id)){await ack(id,'deleted');observed.delete(id);toSave.delete(id)}}
     for(const [id,event] of pending){
       const result=await controller.apply(event);
+      if(result==='failed'){pending.delete(id);continue;}
       if(result==='deferred')break;
       if(result==='review'){review(event);break;}
       pending.delete(id);if(adapter.contains(id)){toSave.set(id,event);observed.add(id);}
@@ -94,7 +96,7 @@ module.exports=function mount(w,config){
     status(session.error||`${session.recording?'录音中':session.paused?'已暂停':'录音已结束'} · ${Math.floor(session.seconds)} 秒 · 待识别 ${session.pending} 段 · 待确认 ${pending.size} 段 · 未保存 ${toSave.size} 段`);
    }catch(e){showError(e)}finally{busy=false}
  }
- const extra=require('./panel-controls.cjs')(w,config,client,panel,{session:()=>session,pending:()=>pending.size,toSave:()=>toSave.size,status,refreshDevices});
+ const extra=require('./panel-controls.cjs')(w,config,client,panel,{session:()=>session,pending:()=>pending.size,toSave:()=>toSave.size,status,refreshDevices,replayFailed:id=>{if(id===session?.sessionId){replayRevision++;after=0;}}});
  $('asr-pause').onclick=pause;$('asr-start').onclick=start;$('asr-stop').onclick=stop;$('asr-recover').onclick=()=>recover();
  refreshDevices();const timer=w.setInterval(tick,200);
  const api={start,stop,pause,recover,getState:()=>({session,busy,controlBusy,pending:pending.size,toSave:toSave.size,status:lastStatus}),dispose:()=>{w.clearInterval(timer);extra.dispose();adapter?.dispose();panel.remove();toggle.remove();style.remove()}};

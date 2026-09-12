@@ -39,7 +39,11 @@ static class PipelineTests {
    if(db.ReadyEvents("concurrent",0).Single().Text!="完成的润色")throw new Exception("In-flight result corrupted by retry");
    Console.WriteLine("PASS retry waits for in-flight task and preserves completed result");
    db.CreateSession("retry-limit","d","C:\\test.md");db.EnablePolish("retry-limit");db.AddFinal("retry-limit","blocked",0,100,"原始文本",false);db.SnapshotPolish("blocked","unused");db.FailPolish("blocked",3,"模拟重试耗尽");
-   if(db.NextPolish()!=null||db.ReadyEvents("retry-limit",0).Count!=0)throw new Exception("Retry cap bypassed or raw released");
+   if(db.NextPolish()!=null||db.ReadyEvents("retry-limit",0).Single().PolishState!="failed")throw new Exception("Retry cap bypassed or raw released");
+   db.AddFinal("retry-limit","after-blocked",100,200,"有效后续内容",false);
+   if(db.NextPolish()?.Id!="after-blocked")throw new Exception("Exhausted polish blocks later utterances");
+   db.SnapshotPolish("after-blocked","unused");db.CompletePolish("after-blocked","润色后的有效内容");
+   if(db.ReadyEvents("retry-limit",0).Count!=2||db.ReadyEvents("retry-limit",0)[1].Text!="润色后的有效内容")throw new Exception("Failed segment blocks ready content");
    db.RetryPolish("retry-limit");if(db.NextPolish()?.Id!="blocked")throw new Exception("Manual retry did not unblock exhausted task");db.Acknowledge("retry-limit","blocked","deleted");
    Console.WriteLine("PASS retry limit retains raw and requires manual retry");
    db.CreateSession("old-backlog","d","C:\\old.md");db.EnablePolish("old-backlog");db.AddFinal("old-backlog","old-first",0,100,"旧积压",false);
@@ -69,14 +73,14 @@ static class PipelineTests {
    Console.WriteLine("PASS truncated ASR splits into bounded intervals without losing audio coverage");
    using var sentenceHttp=new HttpClient(new SentenceAsr());
    await using(var live=new RecordingSession("live-sentence","d","C:\\test.md",root,db,new AsrClient(sentenceHttp,"http://localhost","test"))){
-    live.Accept(Enumerable.Repeat((short)8000,16000).ToArray());live.Accept(new short[2560]);
+    live.Accept(Enumerable.Repeat((short)8000,16000).ToArray());live.Accept(new short[2560]);await Task.Delay(350);
+    if(db.Events("live-sentence",0).Count!=0)throw new Exception("Short hesitation was mistaken for a complete sentence");
+    live.Accept(new short[4800]);
     var deadline=DateTime.UtcNow.AddSeconds(2);while(db.Events("live-sentence",0).Count==0&&DateTime.UtcNow<deadline)await Task.Delay(20);
-    if(db.Events("live-sentence",0).Count!=1||db.ScheduledEnd("live-sentence")!=18560)throw new Exception("Complete sentence missing final or durable recovery boundary");
-    live.Accept(Enumerable.Repeat((short)8000,16000).ToArray());live.Accept(new short[7360]);
-    deadline=DateTime.UtcNow.AddSeconds(2);while(db.Events("live-sentence",0).Count<2&&DateTime.UtcNow<deadline)await Task.Delay(20);
-    var events=db.Events("live-sentence",0);if(events.Count!=2||events[0].End!=events[1].Start)throw new Exception("Sentence commit lost or duplicated following audio");
+    live.Accept(new short[32000]);await Task.Delay(300);
+    if(db.Events("live-sentence",0).Count!=1)throw new Exception("Silent tail generated phantom utterances");
    }
-   Console.WriteLine("PASS complete sentence commits at short pause and retains following audio");
+   Console.WriteLine("PASS short hesitation waits for clear pause; trailing silence creates no phantom events");
    var heldPreview=new HeldPreviewAsr();using var previewHttp=new HttpClient(heldPreview);
    await using(var live=new RecordingSession("live-pause","d","C:\\test.md",root,db,new AsrClient(previewHttp,"http://localhost","test"))){
     live.Accept(Enumerable.Repeat((short)8000,32000).ToArray());await heldPreview.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));

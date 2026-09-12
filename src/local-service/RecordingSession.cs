@@ -81,7 +81,7 @@ public sealed class RecordingSession : IAsyncDisposable
             ledger.EndSpan(Id,audio.Samples);
             foreach(var segment in segmenter.Push(pcm)) Enqueue(segment);
             ledger.SetProgress(Id,segmenter.ActiveStart ?? audio.Samples);
-            if(audio.Samples-lastPreview>=32000 || segmenter.ShortPause) {preview=segmenter.Snapshot();lastPreview=audio.Samples;}
+            if(audio.Samples-lastPreview>=32000) {preview=segmenter.Snapshot();lastPreview=audio.Samples;}
         }
     }
     private void Enqueue(AudioSegment s) {ledger.AddJob(Id,$"{Id}:{s.Start}",s.Start,s.End,s.NeedsReview);preview=null;Hypothesis=null;previewCancellation?.Cancel();}
@@ -114,15 +114,7 @@ public sealed class RecordingSession : IAsyncDisposable
                     else lock(gate) {
                         // A result for a finalized segment must never resurrect its preview.
                         var current=segmenter.Snapshot();
-                        if(current?.Start==snap!.Start){
-                            if(System.Text.RegularExpressions.Regex.IsMatch(text,"[。！？!?][\\\"'”’）)]*$") && segmenter.CanConfirmSentence(snap)){
-                                // Persist ownership before consuming memory; failure/restart retains an exact job.
-                                ledger.AddJob(Id,$"{Id}:{snap.Start}",snap.Start,snap.End,false);
-                                segmenter.ConfirmSentence(snap);
-                                ledger.AddFinal(Id,$"{Id}:{snap.Start}",snap.Start,snap.End,text,false);
-                                ledger.SetProgress(Id,segmenter.ActiveStart??audio.Samples);preview=null;Hypothesis=null;
-                            }else Hypothesis=new {segmentId=$"{Id}:{snap.Start}",revision=++revision,text,end=snap.End};
-                        }
+                        if(current?.Start==snap!.Start)Hypothesis=new {segmentId=$"{Id}:{snap.Start}",revision=++revision,text,end=snap.End};
                     }
                     Error="";
                 } catch(OperationCanceledException) when(job.Id==null && !cancel.IsCancellationRequested && ledger.PendingCount(Id)>0) {
