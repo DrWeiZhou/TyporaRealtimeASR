@@ -1,0 +1,110 @@
+# TyporaRealtimeASR
+
+Windows 本地 Qwen3-ASR 实时语音记录插件，当前适配 **Typora 1.14.10**。
+
+麦克风 → WASAPI → 16kHz 单声道 → 本地 llama-server → 当前句预览 → 最终短句追加 → Typora 保存 Markdown。你可以同时修改已经写入的内容，后续识别不会重写历史段落。
+
+## 从源码首次配置
+
+仓库提供源码，不包含 Typora、模型权重、llama-server、.NET SDK、录音或本机配置。请准备 Windows x64、Typora 1.14.10、.NET 10 SDK，以及配套的 Qwen3-ASR GGUF 主模型、mmproj 和支持音频输入的 llama-server。
+
+1. 将 `config.example.json` 复制为 `config.local.json`，填写本机模型和 llama-server 路径及 Vulkan 设备。
+2. 执行 `powershell -ExecutionPolicy Bypass -File tools/publish.ps1` 构建服务。
+3. 按下方说明安装插件，重启 Typora，然后运行 `start.cmd`。
+
+暂停续录、麦克风电平、面板一键启动、独立保存状态及在线 LLM 润色目前处于设计阶段，尚未实现；见 `docs/superpowers/specs/2026-09-12-recording-polish-design.md`。
+
+## 使用
+
+1. 配置完成后双击项目根目录 `start.cmd`，等待“本地模型与转写服务就绪”。
+2. 在 Typora 中打开并保存一个 `.md` 文件。首次安装后需要重启 Typora。
+3. 在右侧“语音记录”面板选择麦克风，默认使用系统默认设备，点击“开始录音”。
+4. 当前句在面板中更新，检测到停顿的短句会追加到“实时记录”节。可随时编辑前面的内容。
+5. 点击“停止录音”，等待待识别、待确认、未保存计数全部为 0。无法确定的长句边界需要在面板里选择插入或忽略。
+
+`Ctrl+Alt+R` 收起/展开面板。应用不自动开始录音。
+
+## 安装与卸载
+
+安装到默认 `C:\Program Files\Typora` 需要管理员 PowerShell：
+
+```powershell
+.\tools\install-plugin.ps1
+```
+
+自定义安装目录：
+
+```powershell
+.\tools\install-plugin.ps1 -TyporaPath 'D:\Apps\Typora'
+```
+
+卸载加载入口，重启后生效；保留录音、转写日志和模型：
+
+```powershell
+.\tools\install-plugin.ps1 -Uninstall
+```
+
+安装前会保留 `resources/window.html.before-asr`。安装器只增加本插件的脚本入口，不替换现有第三方插件配置。Typora 更新可能移除入口，此时重新安装；未经验证的新 Typora 版本会拒绝自动写正文。
+
+为了保持安装范围小，当前实现使用独立脚本加载器，不要求安装完整 obgnail 插件集合；编辑事务与 UI 通过独立适配层封装。可与社区框架共存，但共存组合尚未专项验收。
+
+## 文件与数据
+
+- `src/local-service`：.NET 10、NAudio、SQLite 本地会话服务。
+- `src/typora-plugin`：面板、认证客户端、事件去重和 Typora 编辑器适配层。
+- `config.local.json`：当前电脑的模型路径；换电脑参考 `config.example.json`。
+- `runtime/publish`：自包含 Windows x64 服务，运行时不依赖系统安装 .NET。
+- `.asr/audio/*.pcm`：原始转写输入，16kHz、单声道、PCM16 little-endian。
+- `.asr/events.sqlite3`：会话、待识别任务、转写事件、确认状态与处理位置。
+- `.asr/connection.json`：本地连接令牌，不要分享或提交版本库。
+- `artifacts`：基准和集成测试报告。
+
+服务只写旁路数据，**记录.md 始终由 Typora 保存**。录音每批持久化并刷新磁盘，内存只保留有界当前段；初版采用单会话原始 PCM 文件，避免异常退出后的 WAV 文件头修复问题，尚未实现分卷轮换。
+
+## 编辑与恢复规则
+
+默认只把最终短句写入正文，临时识别在面板中显示。HTML 注释中的 `asr-insert` / `asr-event` 是定位与恢复标记，请保留；文本和标点可以自由改写。
+
+- 中文输入法组合期间延迟插入，不抢光标；每次自动插入有独立撤销记录。
+- 切换文件后停止向正文补写，后台采集继续，直到明确停止录音。
+- 源码模式、锚点缺失/重复、磁盘内容冲突时暂停补写，保留事件。
+- 文件另存为或改名后请停止旧会话并重新开始；初版不自动迁移路径绑定。
+- 一个文档只允许一个插件窗口持有写入租约，不支持多编辑器实时协同。
+- 服务重启后在原文档选择“恢复记录”，选择原会话。恢复只处理录音和待写事件，不自动打开麦克风。
+- 插入前先记录 applying 意图，插入后标记 applied，校验 Typora 保存到磁盘后才确认 saved。模糊状态不会自动重放，必须核对后选择插入/忽略。
+- 删除或撤销已入文内容不会因为当前会话重放而自动复活；跨崩溃无法明确判断的情况进入待确认列表。
+- 正常停止后重新开始会建立新录音会话，时间戳从 0 开始。初版不提供同一会话内暂停/继续采集。
+
+初版通信使用 500ms 轮询获取有序事件与状态，具有游标重放、窗口租约和认证；未引入 WebSocket。模型推理全局串行，预览可以合并，final 持久排队。长句在约 15 秒到达强制边界时，两侧文本保留为待确认，不自动尝试不可靠的文字去重。
+
+## 开发与验证
+
+需要 Node.js 和 .NET 10 SDK；这台电脑的项目内 SDK 位于 `runtime/dotnet`。
+
+```powershell
+.\tools\test.ps1
+# 模型已启动且测试 PCM 已准备好时：
+.\tools\test.ps1 -Live
+node --test tests/editor/http.test.cjs
+# 生成自包含服务：
+.\tools\publish.ps1
+```
+
+已完成的实测与未完成项见 `docs/verification.md`。真麦克风连续两小时、不同噪声条件、真实中文输入法候选窗交互、不同 Typora 版本仍需现场验收。输入法自动测试覆盖 composition 事件状态，不等于所有输入法都通过实际人工操作验证。
+
+## 常见问题
+
+- **没有面板**：确认安装成功并重启 Typora；版本需要是 1.14.10。
+- **服务无法连接**：先运行 `start.cmd`；日志在 `artifacts/service.*.log`。
+- **模型未就绪**：检查 `config.local.json` 的路径和 Vulkan 设备。服务复用 `127.0.0.1:18081` 的模型实例。
+- **麦克风不可用**：选择系统默认设备或内置阵列；检查 Windows 麦克风隐私设置。当前使用 WASAPI，测试中旧 WinMM 接口无法打开设备。
+- **显示未保存**：返回 Typora 普通编辑模式，完成输入法组合并保存。Typora 的保存接口在窗口不活动时可能延迟保存，面板不会提前显示成功。
+- **防火墙权限**：本项目仅使用回环地址，不需要向局域网开放端口。`tools/repair-firewall.ps1` 可在管理员授权下添加仅限本机 TCP 18082 的规则。
+
+Qwen 与 llama.cpp 基准来源保留在原启动指引中；本次复测报告与历史结果分开保存。
+
+## 许可证
+
+Copyright (C) 2026 DrWeiZhou。项目代码采用 **GNU General Public License v3.0（GPL-3.0-only）**，完整条款见 [LICENSE](LICENSE)。
+
+Typora、Qwen 模型、llama.cpp 和其他第三方依赖分别遵循各自的许可证，本项目的许可证不替代其授权条款。仓库不分发 Typora 或模型权重。

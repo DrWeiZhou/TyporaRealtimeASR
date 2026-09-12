@@ -1,0 +1,7 @@
+{
+  "llamaDirectory": "D:/your-existing-asr/llama-b10809",
+  "model": "D:/your-existing-asr/models/Qwen3-ASR-0.6B-Q8_0.gguf",
+  "mmproj": "D:/your-existing-asr/models/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+  "device": "Vulkan0",
+  "asrEndpoint": "http://127.0.0.1:18081"
+}
