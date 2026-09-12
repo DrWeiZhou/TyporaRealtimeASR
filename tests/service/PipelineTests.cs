@@ -42,6 +42,24 @@ static class PipelineTests {
    if(db.NextPolish()!=null||db.ReadyEvents("retry-limit",0).Count!=0)throw new Exception("Retry cap bypassed or raw released");
    db.RetryPolish("retry-limit");if(db.NextPolish()?.Id!="blocked")throw new Exception("Manual retry did not unblock exhausted task");db.Acknowledge("retry-limit","blocked","deleted");
    Console.WriteLine("PASS retry limit retains raw and requires manual retry");
+   db.CreateSession("empty-asr","d","C:\\test.md");
+   Directory.CreateDirectory(Path.Combine(root,"audio"));using(var audio=new AudioStore(Path.Combine(root,"audio","empty-asr.pcm"))){audio.Append(new short[32000]);}
+   db.AddJob("empty-asr","empty-1",0,16000,false);db.AddJob("empty-asr","empty-2",16000,32000,false);
+   using var emptyHttp=new HttpClient(new EmptyAsr());
+   await using(var emptySession=new RecordingSession("empty-asr","d","C:\\test.md",root,db,new AsrClient(emptyHttp,"http://localhost","test"),true)){
+    var deadline=DateTime.UtcNow.AddSeconds(3);while(db.PendingCount("empty-asr")>0&&DateTime.UtcNow<deadline)await Task.Delay(50);
+    if(db.PendingCount("empty-asr")!=0||db.Events("empty-asr",0).Count!=2)throw new Exception("Empty ASR blocked subsequent jobs");
+    if(db.Events("empty-asr",0)[0].State!="no_text"||db.ReadyEvents("empty-asr",0)[0].State!="deleted")throw new Exception("Empty ASR entered polishing or editor");
+    if(!db.Transcript("empty-asr").Contains("未返回文字"))throw new Exception("Empty segment missing from raw transcript");
+   }
+   Console.WriteLine("PASS empty ASR retains timestamp and audio, skips insertion, and does not block next job");
+   db.CreateSession("length-asr","d","C:\\test.md");using(var audio=new AudioStore(Path.Combine(root,"audio","length-asr.pcm"))){audio.Append(new short[64000]);}db.AddJob("length-asr","length-asr:0",0,64000,false);
+   using var lengthHttp=new HttpClient(new TruncatedAsr());
+   await using(var lengthSession=new RecordingSession("length-asr","d","C:\\test.md",root,db,new AsrClient(lengthHttp,"http://localhost","test"),true)){
+    var deadline=DateTime.UtcNow.AddSeconds(3);while(db.PendingCount("length-asr")>0&&DateTime.UtcNow<deadline)await Task.Delay(50);
+    var events=db.Events("length-asr",0);if(db.PendingCount("length-asr")!=0||events.Count!=4||events.Any(e=>e.End-e.Start!=16000||e.State!="no_text"))throw new Exception("Truncated jobs were not bounded and preserved as one-second review intervals");
+   }
+   Console.WriteLine("PASS truncated ASR splits into bounded intervals without losing audio coverage");
    using var asrHttp=new HttpClient();var asr=new AsrClient(asrHttp,"http://127.0.0.1:1","test");
    await using var session=new RecordingSession("pause-test","d","C:\\test.md",root,db,asr);
    session.Accept(Enumerable.Repeat((short)8192,3200).ToArray());
@@ -67,5 +85,12 @@ static class PipelineTests {
  sealed class HeldLlm:HttpMessageHandler {
   public TaskCompletionSource Started=new(TaskCreationOptions.RunContinuationsAsynchronously),Release=new(TaskCreationOptions.RunContinuationsAsynchronously);
   protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token){Started.SetResult();await Release.Task.WaitAsync(token);return new(HttpStatusCode.OK){Content=new StringContent("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"完成的润色\"}}]}")};}
+ }
+ sealed class EmptyAsr:HttpMessageHandler {
+  private int calls;
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token){var text=++calls==1?"language Chinese<asr_text>":"language Chinese<asr_text>有效识别";var json=JsonSerializer.Serialize(new{choices=new[]{new{delta=new{content=text},finish_reason="stop"}}});return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("data: "+json+"\n\ndata: [DONE]\n\n")});}
+ }
+ sealed class TruncatedAsr:HttpMessageHandler {
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"delta\":{\"content\":\"半句\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n")});
  }
 }

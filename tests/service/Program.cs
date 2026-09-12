@@ -18,6 +18,10 @@ Check("VAD retains sub-block tail and emits final at stop", () => {
     vad.Push(pcm); var last = vad.Flush();
     Equal(1234L, last!.End); Equal(0L,last.Start);
 });
+Check("Normally finished empty ASR result is distinct from an interrupted stream",()=>{
+ var empty=new AsrOutput();empty.Add("language Chinese<asr_text>","stop");Equal("",empty.FinalText());
+ var interrupted=new AsrOutput();interrupted.Add("");try{interrupted.FinalText();throw new Exception("Accepted unfinished stream");}catch(InvalidDataException){}
+});
 Check("VAD silence produces no speech and endpoint includes tail", () => {
     var vad = new Segmenter(16000,700,15,0.01);
     Equal(0,vad.Push(new short[16000]).Count);

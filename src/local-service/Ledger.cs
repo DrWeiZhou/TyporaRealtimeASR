@@ -20,11 +20,18 @@ public sealed partial class Ledger : IDisposable
     public void CreateSession(string id,string document,string path) => Execute("INSERT OR IGNORE INTO sessions VALUES($0,$1,$2)",id,document,path);
     public void AddJob(string session,string id,long start,long end,bool review) => Execute("INSERT OR IGNORE INTO jobs VALUES($0,$1,$2,$3,$4,'pending','')",id,session,start,end,review?1:0);
     public void FailJob(string id,string error) => Execute("UPDATE jobs SET error=$1 WHERE id=$0",id,error);
+    public void SplitJob(string session,string id,long start,long end) {
+        var middle=start+(end-start)/2;
+        lock(gate){using var transaction=db.BeginTransaction();using var c=db.CreateCommand();c.Transaction=transaction;
+            c.CommandText="UPDATE jobs SET end=$2,review=1,error='' WHERE id=$0 AND state='pending'; INSERT OR IGNORE INTO jobs VALUES($1,$3,$2,$4,1,'pending','');";
+            object[] values=[id,$"{session}:{middle}",middle,session,end];for(var i=0;i<values.Length;i++)c.Parameters.AddWithValue("$"+i,values[i]);c.ExecuteNonQuery();transaction.Commit();
+        }
+    }
     public void AddFinal(string session,string id,long start,long end,string text,bool review) {
         lock(gate) {
             using var transaction=db.BeginTransaction();
             using var c=db.CreateCommand(); c.Transaction=transaction;
-            c.CommandText="INSERT OR IGNORE INTO events(id,session,start,end,text,review,state) VALUES($0,$1,$2,$3,$4,$5,'recognized'); UPDATE jobs SET state='done',error='' WHERE id=$0;";
+            c.CommandText="INSERT OR IGNORE INTO events(id,session,start,end,text,review,state) VALUES($0,$1,$2,$3,$4,$5,CASE WHEN length(trim($4))=0 THEN 'no_text' ELSE 'recognized' END); UPDATE jobs SET state='done',error='' WHERE id=$0;";
             object[] values=[id,session,start,end,text,review?1:0]; for(var i=0;i<values.Length;i++) c.Parameters.AddWithValue("$"+i,values[i]);
             c.ExecuteNonQuery(); transaction.Commit();
             ExportTranscript(session);
@@ -51,6 +58,7 @@ public sealed partial class Ledger : IDisposable
     public long ScheduledEnd(string session) => Scalar("SELECT COALESCE(MAX(end),0) FROM jobs WHERE session=$0",session);
     public void SetProgress(string session,long sample)=>Execute("INSERT INTO progress VALUES($0,$1) ON CONFLICT(session) DO UPDATE SET sample=$1",session,sample);
     public long Progress(string session)=>Scalar("SELECT COALESCE(MAX(sample),0) FROM progress WHERE session=$0",session);
+    public long NoTextCount(string session)=>Scalar("SELECT COUNT(*) FROM events WHERE session=$0 AND state='no_text'",session);
     public long PendingCount(string session) => Scalar("SELECT COUNT(*) FROM jobs WHERE session=$0 AND state='pending'",session);
     private long Scalar(string sql,string session) {lock(gate){using var c=db.CreateCommand();c.CommandText=sql;c.Parameters.AddWithValue("$0",session);return Convert.ToInt64(c.ExecuteScalar());}}
     public (string Document,string Path)? Session(string id) {lock(gate){using var c=db.CreateCommand();c.CommandText="SELECT document,path FROM sessions WHERE id=$0";c.Parameters.AddWithValue("$0",id);using var r=c.ExecuteReader();return r.Read()?(r.GetString(0),r.GetString(1)):null;}}

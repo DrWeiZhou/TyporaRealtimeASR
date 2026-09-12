@@ -10,7 +10,10 @@ public sealed class AsrOutput
     private string? finish;
     public void Add(string text, string? reason = null) { raw.Append(text); if(reason != null) finish = reason; }
     public string Text { get { var s = raw.ToString(); var i = s.IndexOf("<asr_text>", StringComparison.Ordinal); return i >= 0 ? s[(i+10)..].Trim() : s.StartsWith("language ") ? "" : s.Trim(); } }
-    public string FinalText() => finish == "stop" && Text.Length > 0 ? Text : throw new InvalidDataException($"ASR did not finish normally ({finish ?? "missing finish"})");
+    public string FinalText() {
+        if(finish=="stop")return Text;
+        var error=new InvalidDataException($"ASR did not finish normally ({finish ?? "missing finish"})");error.Data["FinishReason"]=finish??"";throw error;
+    }
 }
 
 public sealed class AsrClient(HttpClient http, string endpoint, string model)
