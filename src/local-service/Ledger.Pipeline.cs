@@ -5,6 +5,8 @@ namespace TyporaAsr;
 public sealed record PolishJob(string Id,string Session,string Text,string? Config,int Attempts);
 public sealed partial class Ledger {
  private string storageRoot="";
+ private readonly Dictionary<string,DateTime> recentActivity=new();
+ public void TouchSession(string session){lock(gate){recentActivity[session]=DateTime.UtcNow;}}
  private void InitializePipeline(string root){
   storageRoot=root;
   Execute("CREATE TABLE IF NOT EXISTS polish_sessions(session TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS polish(id TEXT PRIMARY KEY,config TEXT,result TEXT,attempts INTEGER NOT NULL DEFAULT 0,next INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS spans(session TEXT,start INTEGER,end INTEGER,wall TEXT,PRIMARY KEY(session,start));");
@@ -13,8 +15,9 @@ public sealed partial class Ledger {
  public void BeginSpan(string session,long sample,DateTimeOffset wall)=>Execute("INSERT OR REPLACE INTO spans VALUES($0,$1,$1,$2)",session,sample,wall.ToString("O"));
  public void EndSpan(string session,long sample)=>Execute("UPDATE spans SET end=$1 WHERE session=$0 AND start=(SELECT MAX(start) FROM spans WHERE session=$0)",session,sample);
  public PolishJob? NextPolish(){lock(gate){
-  // Only the first unfinished event in each session may be dispatched. Failed sessions do not block other sessions.
-  using var c=db.CreateCommand();c.CommandText="SELECT e.id,e.session,e.text,p.config,COALESCE(p.attempts,0) FROM events e JOIN polish_sessions s ON s.session=e.session LEFT JOIN polish p ON p.id=e.id WHERE e.state IN ('recognized','reviewed') AND p.result IS NULL AND COALESCE(p.attempts,0)<3 AND COALESCE(p.next,0)<=$0 AND NOT EXISTS(SELECT 1 FROM events before LEFT JOIN polish bp ON bp.id=before.id WHERE before.session=e.session AND before.seq<e.seq AND before.state IN ('recognized','reviewed') AND bp.result IS NULL) ORDER BY e.seq LIMIT 1";c.Parameters.AddWithValue("$0",DateTimeOffset.UtcNow.ToUnixTimeSeconds());using var r=c.ExecuteReader();return r.Read()?new(r.GetString(0),r.GetString(1),r.GetString(2),r.IsDBNull(3)?null:r.GetString(3),r.GetInt32(4)):null;
+  // Prioritize the session being used, then newer sessions; retain order inside each session.
+  var preferred=recentActivity.Where(x=>x.Value>DateTime.UtcNow.AddSeconds(-12)).OrderByDescending(x=>x.Value).Select(x=>x.Key).FirstOrDefault()??"";
+  using var c=db.CreateCommand();c.CommandText="SELECT e.id,e.session,e.text,p.config,COALESCE(p.attempts,0) FROM events e JOIN polish_sessions s ON s.session=e.session JOIN sessions metadata ON metadata.id=e.session LEFT JOIN polish p ON p.id=e.id WHERE e.state IN ('recognized','reviewed') AND p.result IS NULL AND COALESCE(p.attempts,0)<3 AND COALESCE(p.next,0)<=$0 AND NOT EXISTS(SELECT 1 FROM events before LEFT JOIN polish bp ON bp.id=before.id WHERE before.session=e.session AND before.seq<e.seq AND before.state IN ('recognized','reviewed') AND bp.result IS NULL) ORDER BY CASE WHEN e.session=$1 THEN 0 ELSE 1 END,metadata.rowid DESC,e.seq LIMIT 1";c.Parameters.AddWithValue("$1",preferred);c.Parameters.AddWithValue("$0",DateTimeOffset.UtcNow.ToUnixTimeSeconds());using var r=c.ExecuteReader();return r.Read()?new(r.GetString(0),r.GetString(1),r.GetString(2),r.IsDBNull(3)?null:r.GetString(3),r.GetInt32(4)):null;
  }}
  public void SnapshotPolish(string id,string config)=>Execute("INSERT INTO polish(id,config) VALUES($0,$1) ON CONFLICT(id) DO UPDATE SET config=COALESCE(config,$1)",id,config);
  public void CompletePolish(string id,string result)=>Execute("UPDATE polish SET result=$1,error='' WHERE id=$0 AND result IS NULL",id,result);

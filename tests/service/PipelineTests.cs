@@ -42,6 +42,13 @@ static class PipelineTests {
    if(db.NextPolish()!=null||db.ReadyEvents("retry-limit",0).Count!=0)throw new Exception("Retry cap bypassed or raw released");
    db.RetryPolish("retry-limit");if(db.NextPolish()?.Id!="blocked")throw new Exception("Manual retry did not unblock exhausted task");db.Acknowledge("retry-limit","blocked","deleted");
    Console.WriteLine("PASS retry limit retains raw and requires manual retry");
+   db.CreateSession("old-backlog","d","C:\\old.md");db.EnablePolish("old-backlog");db.AddFinal("old-backlog","old-first",0,100,"旧积压",false);
+   db.CreateSession("current-note","d","C:\\current.md");db.EnablePolish("current-note");db.AddFinal("current-note","new-first",0,100,"当前第一句",false);db.AddFinal("current-note","new-second",100,200,"当前第二句",false);
+   if(db.NextPolish()?.Id!="new-first")throw new Exception("Old backlog starved the current document");
+   db.TouchSession("old-backlog");if(db.NextPolish()?.Id!="old-first")throw new Exception("Active older session was not prioritized");db.TouchSession("current-note");
+   db.Acknowledge("current-note","new-first","deleted");if(db.NextPolish()?.Id!="new-second")throw new Exception("Current document sequence changed");
+   db.Acknowledge("current-note","new-second","deleted");if(db.NextPolish()?.Id!="old-first")throw new Exception("Old backlog never resumed");db.Acknowledge("old-backlog","old-first","deleted");
+   Console.WriteLine("PASS current document polish bypasses old backlog while preserving session order");
    db.CreateSession("empty-asr","d","C:\\test.md");
    Directory.CreateDirectory(Path.Combine(root,"audio"));using(var audio=new AudioStore(Path.Combine(root,"audio","empty-asr.pcm"))){audio.Append(new short[32000]);}
    db.AddJob("empty-asr","empty-1",0,16000,false);db.AddJob("empty-asr","empty-2",16000,32000,false);

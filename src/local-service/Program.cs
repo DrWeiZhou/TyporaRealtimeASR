@@ -38,7 +38,7 @@ void Claim(string path,string owner) {
 }
 RecordingSession Owned(string id,HttpContext context) {
     if(!sessions.TryGetValue(id,out var s))throw new ArgumentException("请先恢复会话");
-    Claim(s.Path,Client(context));return s;
+    Claim(s.Path,Client(context));ledger.TouchSession(id);return s;
 }
 app.MapGet("/health",()=>new {status="ok",protocolVersion=2});
 app.MapGet("/model-health",async()=>{try{using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(3));using var response=await http.GetAsync(endpoint.TrimEnd('/')+"/health",deadline.Token);return Results.Ok(new {ready=response.IsSuccessStatusCode});}catch{return Results.Ok(new {ready=false});}});
