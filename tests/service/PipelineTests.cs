@@ -21,7 +21,8 @@ static class PipelineTests {
    var handler=new FakeLlm();using var http=new HttpClient(handler);
    var pipeline=new PolishPipeline(db,settings,http);
    await pipeline.Step(CancellationToken.None);
-   if(db.ReadyEvents("s",0).Count!=0)throw new Exception("Failure released raw text");
+   if(db.ReadyEvents("s",0).Single().PolishState!="failed"||db.ReadyEvents("s",0).Single().Text!="")throw new Exception("Failure released raw text");
+   if(db.NextPolish()?.Id!="e2")throw new Exception("Retry backoff blocked subsequent utterance");
    db.RetryPolish("s");await pipeline.Step(CancellationToken.None);
    if(db.ReadyEvents("s",0).Single().Text!="润色一")throw new Exception("Polished output missing");
    await pipeline.Step(CancellationToken.None);
@@ -77,14 +78,14 @@ static class PipelineTests {
     if(db.Events("live-sentence",0).Count!=0)throw new Exception("Short hesitation was mistaken for a complete sentence");
     live.Accept(new short[4800]);
     var deadline=DateTime.UtcNow.AddSeconds(2);while(db.Events("live-sentence",0).Count==0&&DateTime.UtcNow<deadline)await Task.Delay(20);
-    live.Accept(new short[32000]);await Task.Delay(300);
+    live.Accept(new short[40000]);await Task.Delay(300);
     if(db.Events("live-sentence",0).Count!=1)throw new Exception("Silent tail generated phantom utterances");
    }
    Console.WriteLine("PASS short hesitation waits for clear pause; trailing silence creates no phantom events");
    var heldPreview=new HeldPreviewAsr();using var previewHttp=new HttpClient(heldPreview);
    await using(var live=new RecordingSession("live-pause","d","C:\\test.md",root,db,new AsrClient(previewHttp,"http://localhost","test"))){
     live.Accept(Enumerable.Repeat((short)8000,32000).ToArray());await heldPreview.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
-    live.Accept(new short[7360]);
+    live.Accept(new short[40000]);
     var deadline=DateTime.UtcNow.AddMilliseconds(1500);while(db.Events("live-pause",0).Count==0&&DateTime.UtcNow<deadline)await Task.Delay(20);
     if(db.Events("live-pause",0).Count!=1||!heldPreview.Cancelled)throw new Exception("Preview blocked final utterance or required stopping recording");
    }

@@ -9,7 +9,7 @@ public sealed class RecordingSession : IAsyncDisposable
     private readonly Ledger ledger;
     private readonly AudioStore audio;
     private readonly AsrClient asr;
-    private readonly Segmenter segmenter=new();
+    private readonly Segmenter segmenter=Segmenter.ForNotes();
     private readonly CancellationTokenSource cancel=new();
     private readonly Task worker;
     private WasapiCapture? capture;
@@ -97,7 +97,8 @@ public sealed class RecordingSession : IAsyncDisposable
             lock(gate){capture?.Dispose();capture=null;endpoint?.Dispose();endpoint=null;Rms=Peak=0;if(!pause){inputClosed=true;paused=false;}}
         }finally{lifecycle.Release();}
     }
-    public object Status()=>new {sessionId=Id,documentId=DocumentId,path=Path,recording,paused,processing,ended=inputClosed,rms=Rms,peak=Peak,audioSavedSamples=audio.Samples,samples=audio.Samples,seconds=audio.Samples/16000.0,pending=ledger.PendingCount(Id),polish=ledger.PolishStatus(Id),error=captureError.Length>0?captureError:Error.Length>0?Error:ledger.NoTextCount(Id)>0?$"有 {ledger.NoTextCount(Id)} 段未识别到文字，原始逐字稿已标记，音频已保留":"",hypothesis=Hypothesis};
+    private double BufferedSeconds {get{lock(gate){return segmenter.ActiveStart is long start?(audio.Samples-start)/16000.0:0;}}}
+    public object Status()=>new {sessionId=Id,documentId=DocumentId,path=Path,recording,paused,processing,ended=inputClosed,rms=Rms,peak=Peak,audioSavedSamples=audio.Samples,samples=audio.Samples,seconds=audio.Samples/16000.0,bufferedSeconds=BufferedSeconds,pending=ledger.PendingCount(Id),polish=ledger.PolishStatus(Id),error=captureError.Length>0?captureError:Error.Length>0?Error:ledger.NoTextCount(Id)>0?$"有 {ledger.NoTextCount(Id)} 段未识别到文字，原始逐字稿已标记，音频已保留":"",hypothesis=Hypothesis};
     private async Task Work() {
         while(!cancel.IsCancellationRequested) {
             try {

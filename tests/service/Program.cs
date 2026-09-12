@@ -2,6 +2,16 @@ using TyporaAsr;
 using NAudio.Wave;
 using NAudio.CoreAudioApi;
 
+if(args.Length==3 && args[0]=="--segment-wav"){
+ using var input=new FileStream(args[1],FileMode.Open,FileAccess.Read,FileShare.ReadWrite);using var wav=new WaveFileReader(input);
+ if(wav.WaveFormat.SampleRate!=16000||wav.WaveFormat.Channels!=1||wav.WaveFormat.BitsPerSample!=16)throw new Exception("Expected mono PCM16 16kHz WAV");
+ var segmenter=Segmenter.ForNotes();var segments=new List<AudioSegment>();var bytes=new byte[640];int count;
+ while((count=wav.Read(bytes,0,bytes.Length))>0){var samples=new short[count/2];Buffer.BlockCopy(bytes,0,samples,0,count);segments.AddRange(segmenter.Push(samples));}
+ var tail=segmenter.Flush();if(tail!=null)segments.Add(tail);
+ File.WriteAllText(args[2],System.Text.Json.JsonSerializer.Serialize(segments.Select(s=>new {start=s.Start,end=s.End,review=s.NeedsReview})));
+ Console.WriteLine($"PASS real WAV replay: {segments.Count} accumulated segments, {segments.Count(s=>s.NeedsReview)} waiting for review");return;
+}
+
 var failures = 0;
 void Check(string name, Action test) { try { test(); Console.WriteLine($"PASS {name}"); } catch(Exception e) { failures++; Console.WriteLine($"FAIL {name}: {e.Message}"); } }
 void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected,actual)) throw new Exception($"Expected {expected}, got {actual}"); }
@@ -39,6 +49,16 @@ Check("Continuous speech is bounded and marked for review", () => {
     var vad = new Segmenter(16000,700,1,0.01);
     var done = vad.Push(Enumerable.Repeat((short)5000,16000).ToArray());
     Equal(1,done.Count); Equal(true,done[0].NeedsReview);
+});
+Check("Note segments accumulate short phrases and flush at a natural pause",()=>{
+ var vad=Segmenter.ForNotes();var list=new List<AudioSegment>();
+ for(var i=0;i<3;i++){list.AddRange(vad.Push(Enumerable.Repeat((short)4000,24000).ToArray()));list.AddRange(vad.Push(new short[9600]));}
+ Equal(0,list.Count);list.AddRange(vad.Push(new short[9600]));Equal(1,list.Count);Equal(false,list[0].NeedsReview);
+});
+Check("Note segments have bounded latency and continuous speech never waits for review",()=>{
+ var vad=Segmenter.ForNotes();var first=vad.Push(Enumerable.Repeat((short)4000,320000).ToArray());Equal(1,first.Count);Equal(false,first[0].NeedsReview);
+ var second=vad.Push(Enumerable.Repeat((short)4000,320000).ToArray());Equal(1,second.Count);Equal(false,second[0].NeedsReview);Equal(first[0].End,second[0].Start);vad.Push(Enumerable.Repeat((short)4000,8000).ToArray());Equal(false,vad.Flush()!.NeedsReview);
+ var shortNote=Segmenter.ForNotes();shortNote.Push(Enumerable.Repeat((short)4000,8000).ToArray());Equal(1,shortNote.Push(new short[40000]).Count);
 });
 Check("Ledger persists events, deduplicates finals and preserves deletion state", () => {
     var root = Path.Combine(Path.GetTempPath(),"typora-asr-test-"+Guid.NewGuid());
