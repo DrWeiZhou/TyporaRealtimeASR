@@ -17,7 +17,7 @@ module.exports=async function(w){
  const after=w.File.editor.getMarkdown();
  await w.document.querySelector('#asr-raw').onclick();
  const raw=w.document.querySelector('#asr-raw-text').textContent;
- const report={manualPreserved:first.includes('人工未保存改写必须保留'),polishedInserted:first.includes('已润色的第二句话。'),rawBlocked:!first.includes('原始口语')&&!first.includes('不能入文'),timestamps:first.includes('00:00:00–00:00:01'),saved:disk===first,replayNoDuplicate:first===after,rawTimestamp:raw.includes('10:00:00')&&raw.includes('原始口语一'),controlsPresent:['asr-pause','asr-level','asr-service-start','asr-api-key','asr-file-save'].every(id=>!!w.document.getElementById(id)),saveState:w.document.querySelector('#asr-file-save').textContent};
+ const report={manualPreserved:first.includes('人工未保存改写必须保留'),polishedInserted:first.includes('已润色的第二句话。'),rawBlocked:!first.includes('原始口语')&&!first.includes('不能入文'),orderedList:/^1\. /m.test(first)&&/^2\. /m.test(first)&&!first.includes('00:00:00–00:00:01'),saved:disk===first,replayNoDuplicate:first===after,rawTimestamp:raw.includes('10:00:00')&&raw.includes('原始口语一'),controlsPresent:['asr-pause','asr-level','asr-service-start','asr-api-key','asr-file-save'].every(id=>!!w.document.getElementById(id)),saveState:w.document.querySelector('#asr-file-save').textContent};
  // Block the background GET and verify that critical controls still issue their request.
  const {ServiceClient}=w.reqnode(path.join(source,'client.cjs'));const original=ServiceClient.prototype.request;
  for(const action of ['pause','stop']){

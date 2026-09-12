@@ -23,7 +23,12 @@ class EditorAdapter {
     e.undo.endSnap(true);
     const command=U.makeEmptyCommand(cursor);let previous=anchor;
     for(const spec of specs) {
-      const node=new anchor.constructor(spec);
+      const build=spec=>{
+        const {children,...attributes}=spec;const node=new anchor.constructor(attributes);
+        for(const child of children||[])build(child).set('parent',node);
+        return node;
+      };
+      const node=build(spec);
       if(before){anchor.addBefore(node);e.findElemById(anchor.cid).before(node.toHTML());}
       else {previous.addAfter(node);e.findElemById(previous.cid).after(node.toHTML());previous=node;}
       U.addUndoForInsert(command,node);
@@ -41,10 +46,19 @@ class EditorAdapter {
   insert(event) {
     if(!this.safe())throw new Error('编辑状态改变，等待安全插入');
     if(!/^[a-zA-Z0-9:_-]+$/.test(event.eventId))throw new Error('Invalid event id');
-    const seconds=Math.floor((event.start||0)/16000);
-    const format=s=>[Math.floor(s/3600),Math.floor(s/60)%60,s%60].map(x=>String(x).padStart(2,'0')).join(':');
-    const time=format(seconds)+'–'+format(Math.floor((event.end??event.start??0)/16000));
-    this.transaction(this.anchors()[0],[{type:'html_block',text:`<!-- asr-event:${event.eventId} -->`},{type:'paragraph',text:`\\[${time}\\] ${escapeText(event.text)}`}]);
+    const prefix=`<!-- asr-number:${this.documentId}:`;
+    let number=this.lastNumber||0;
+    for(const node of this.nodes()){
+      const text=(node.get('text')||'').trim();
+      if(['paragraph','html_block'].includes(node.get('type'))&&text.startsWith(prefix)){
+        const match=text.slice(prefix.length).match(/^(\d+) -->$/);if(match)number=Math.max(number,Number(match[1]));
+      }
+    }
+    number++;
+    this.transaction(this.anchors()[0],[{type:'html_block',text:`<!-- asr-event:${event.eventId} -->`},
+      {type:'html_block',text:`${prefix}${number} -->`},
+      {type:'list',style:'ol',start:number,isFixed:false,children:[{type:'list_item',children:[{type:'paragraph',text:escapeText(event.text)}]}]}]);
+    this.lastNumber=number;
   }
   checkDisk() {
     if(this.path()!==this.boundPath)return false;
