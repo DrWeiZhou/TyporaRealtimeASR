@@ -20,13 +20,17 @@ static class WavTests {
     using var readStream=new FileStream(target,FileMode.Open,FileAccess.Read,FileShare.ReadWrite);using var reader=new WaveFileReader(readStream);if(reader.Length!=4)throw new Exception("Legacy PCM migration changed samples");
     if(!File.Exists(legacy))throw new Exception("Legacy backup deleted");
     db.AddFinal(id,id+":0",0,2,"原始文字",false);
-    var transcript=Path.Combine(dir,$"会议.逐字稿-{id}.md");if(!File.Exists(transcript)||!File.ReadAllText(transcript).Contains("原始文字"))throw new Exception("Transcript not beside Markdown");
+    var transcript=SessionFiles.Paths(root,id,doc).Transcript;
+    if(Path.GetFileName(transcript)!=Path.GetFileName(target).Replace(".录音-",".逐字稿-").Replace(".wav",".md"))throw new Exception("Transcript timestamp must match WAV");if(!File.Exists(transcript)||!File.ReadAllText(transcript).Contains("原始文字"))throw new Exception("Transcript not beside Markdown");
     if(File.ReadAllText(doc)!="# 会议")throw new Exception("Target Markdown overwritten");
    }}
    using(var db=new Ledger(root)){
     var oldId=Guid.NewGuid().ToString();db.CreateSession(oldId,"old",doc);db.BeginSpan(oldId,0,DateTimeOffset.Parse("2026-09-12T08:09:10.123+08:00"));
     var oldWav=Path.Combine(dir,$"会议.录音-{oldId}.wav");using(var audio=new AudioStore(oldWav))audio.Append([42,-17]);var before=File.ReadAllBytes(oldWav);
+    var oldTranscript=Path.Combine(dir,$"会议.逐字稿-{oldId}.md");File.WriteAllText(oldTranscript,"保留旧逐字稿");
     var migrated=SessionFiles.PrepareAudio(root,oldId,doc);
+    var migratedTranscript=SessionFiles.Paths(root,oldId,doc).Transcript;
+    if(File.Exists(oldTranscript)||!File.Exists(migratedTranscript)||File.ReadAllText(migratedTranscript)!="保留旧逐字稿")throw new Exception("Legacy transcript migration lost content");
     if(Path.GetFileName(migrated)!="会议.录音-2026-09-12_08-09-10-123.wav"||File.Exists(oldWav)||!File.ReadAllBytes(migrated).SequenceEqual(before))throw new Exception("Timestamp WAV migration lost data or original start time");
     if(SessionFiles.Paths(root,oldId,doc).Audio!=migrated)throw new Exception("Recovered filename changed");
     var other=Guid.NewGuid().ToString();db.CreateSession(other,"other",doc);db.BeginSpan(other,0,DateTimeOffset.Parse("2026-09-12T08:09:10.123+08:00"));

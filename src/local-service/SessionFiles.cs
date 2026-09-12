@@ -1,6 +1,11 @@
 namespace TyporaAsr;
 public static class SessionFiles {
  private static readonly object Gate=new();
+ private static string TranscriptPath(string audio){
+  var stem=Path.GetFileNameWithoutExtension(audio);var marker=stem.LastIndexOf(".录音-",StringComparison.Ordinal);
+  if(marker<0)throw new IOException("录音文件映射名称无效");
+  return Path.Combine(Path.GetDirectoryName(audio)!,stem[..marker]+".逐字稿-"+stem[(marker+4)..]+".md");
+ }
  public static (string Audio,string Transcript) Paths(string root,string session,string document){
   // Non-GUID identifiers are reserved for internal fixtures, never accepted by the public API.
   if(!Guid.TryParse(session,out _))return(Path.Combine(root,"audio",session+".pcm"),Path.Combine(root,"transcripts",session+".md"));
@@ -23,10 +28,12 @@ public static class SessionFiles {
     }
     var stem=Path.Combine(directory,$"{name}.录音-{start:yyyy-MM-dd_HH-mm-ss-fff}");audio=stem+".wav";
     var reserved=Directory.EnumerateFiles(mappings,"*.json").Select(f=>System.Text.Json.JsonSerializer.Deserialize<string>(File.ReadAllText(f))).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    for(var suffix=2;File.Exists(audio)||reserved.Contains(audio);suffix++)audio=stem+$"-{suffix}.wav";
+    for(var suffix=2;File.Exists(audio)||File.Exists(TranscriptPath(audio))||reserved.Contains(audio);suffix++)audio=stem+$"-{suffix}.wav";
     var temp=mapping+".tmp";File.WriteAllText(temp,System.Text.Json.JsonSerializer.Serialize(audio));File.Move(temp,mapping,false);
    }
-   return(audio,Path.Combine(directory,$"{name}.逐字稿-{session}.md"));
+   var transcript=TranscriptPath(audio);var legacyTranscript=Path.Combine(directory,$"{name}.逐字稿-{session}.md");
+   if(!File.Exists(transcript)&&File.Exists(legacyTranscript))File.Move(legacyTranscript,transcript,false);
+   return(audio,transcript);
   }
  }
  public static string PrepareAudio(string root,string session,string document){
