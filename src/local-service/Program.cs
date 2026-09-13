@@ -26,9 +26,11 @@ var sessions=new ConcurrentDictionary<string,RecordingSession>();
 var leases=new Dictionary<string,(string Owner,DateTime Expires)>(StringComparer.OrdinalIgnoreCase);
 var sessionGate=new SemaphoreSlim(1,1);
 var app=builder.Build();
+var shuttingDown=false;
 app.Use(async(context,next)=>{
     if(!CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(context.Request.Headers.Authorization.ToString()),System.Text.Encoding.UTF8.GetBytes("Bearer "+token))) {context.Response.StatusCode=401;return;}
     // No CORS: authenticated native plugin connections only.
+    if(shuttingDown && context.Request.Method!="GET" && context.Request.Path!="/shutdown") {context.Response.StatusCode=409;await context.Response.WriteAsJsonAsync(new {error="服务正在终止"});return;}
     try {await next();}
     catch(Exception error) {context.Response.StatusCode=error is ArgumentException?400:409;await context.Response.WriteAsJsonAsync(new {error=error.Message});}
 });
@@ -40,7 +42,17 @@ RecordingSession Owned(string id,HttpContext context) {
     if(!sessions.TryGetValue(id,out var s))throw new ArgumentException("请先恢复会话");
     Claim(s.Path,Client(context));ledger.TouchSession(id);return s;
 }
-app.MapGet("/health",()=>new {status="ok",protocolVersion=2});
+app.MapGet("/health",()=>new {status="ok",protocolVersion=2,canShutdown=true,processId=Environment.ProcessId});
+app.MapPost("/shutdown",async(HttpContext context)=>{
+    await sessionGate.WaitAsync();
+    try {
+        shuttingDown=true;
+        foreach(var session in sessions.Values)await session.Stop();
+        context.Response.OnCompleted(()=>{app.Lifetime.StopApplication();return Task.CompletedTask;});
+        return Results.Ok(new {stopping=true});
+    } catch {shuttingDown=false;throw;}
+    finally {sessionGate.Release();}
+});
 app.MapGet("/model-health",async()=>{try{using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(3));using var response=await http.GetAsync(endpoint.TrimEnd('/')+"/health",deadline.Token);return Results.Ok(new {ready=response.IsSuccessStatusCode});}catch{return Results.Ok(new {ready=false});}});
 app.MapGet("/polish/config",()=>polishSettings.Public());
 app.MapPost("/polish/config",(PolishConfig config)=>{polishSettings.Save(config);return Results.Ok(polishSettings.Public());});
@@ -56,6 +68,7 @@ app.MapPost("/sessions",async(StartRequest request,HttpContext context)=>{
     if(!System.IO.Path.IsPathFullyQualified(request.Path)||!request.Path.EndsWith(".md",StringComparison.OrdinalIgnoreCase)||!File.Exists(request.Path))throw new ArgumentException("请先保存目标 Markdown 文件");
     await sessionGate.WaitAsync();
     try {
+        if(shuttingDown)throw new InvalidOperationException("服务正在终止");
         var path=System.IO.Path.GetFullPath(request.Path);
         Claim(path,Client(context));
         if(sessions.TryGetValue(request.SessionId,out var prior)){if(prior.Path!=path)throw new ArgumentException("会话路径不匹配");return Results.Ok(prior.Status());}
@@ -73,6 +86,7 @@ app.MapPost("/sessions",async(StartRequest request,HttpContext context)=>{
 });
 app.MapPost("/sessions/{id}/recover",async(string id,HttpContext context)=>{
     await sessionGate.WaitAsync();try {
+        if(shuttingDown)throw new InvalidOperationException("服务正在终止");
         var stored=ledger.Session(id)??throw new ArgumentException("会话不存在");Claim(stored.Path,Client(context));
         ledger.EnablePolish(id);
         var s=sessions.GetOrAdd(id,_=>new RecordingSession(id,stored.Document,stored.Path,root,ledger,asr,true));return Results.Ok(s.Status());
@@ -83,7 +97,7 @@ app.MapGet("/sessions/{id}/events",(string id,long after,HttpContext c)=>{Owned(
 app.MapGet("/sessions/{id}/transcript",(string id,HttpContext c)=>{Owned(id,c);return new {text=ledger.Transcript(id)};});
 app.MapPost("/sessions/{id}/polish/retry",async(string id,HttpContext c)=>{Owned(id,c);await polishPipeline.Retry(id,c.RequestAborted);return Results.Ok();});
 app.MapPost("/sessions/{id}/pause",async(string id,HttpContext c)=>{var s=Owned(id,c);await s.Pause();return Results.Ok(s.Status());});
-app.MapPost("/sessions/{id}/resume",async(string id,ResumeRequest request,HttpContext c)=>{await sessionGate.WaitAsync();try{var s=Owned(id,c);if(sessions.Values.Any(other=>other.Id!=id && other.Recording))throw new ArgumentException("另一个会话正在录音");await s.Resume(request.Device);return Results.Ok(s.Status());}finally{sessionGate.Release();}});
+app.MapPost("/sessions/{id}/resume",async(string id,ResumeRequest request,HttpContext c)=>{await sessionGate.WaitAsync();try{if(shuttingDown)throw new InvalidOperationException("服务正在终止");var s=Owned(id,c);if(sessions.Values.Any(other=>other.Id!=id && other.Recording))throw new ArgumentException("另一个会话正在录音");await s.Resume(request.Device);return Results.Ok(s.Status());}finally{sessionGate.Release();}});
 app.MapPost("/sessions/{id}/stop",async(string id,HttpContext c)=>{var s=Owned(id,c);await s.Stop();return Results.Ok(s.Status());});
 app.MapPost("/sessions/{id}/ack",(string id,AckRequest r,HttpContext c)=>{Owned(id,c);ledger.Acknowledge(id,r.EventId,r.State);return Results.Ok();});
 var connection=new {endpoint=$"http://127.0.0.1:{port}",token,protocolVersion=2};

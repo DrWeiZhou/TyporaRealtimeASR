@@ -23,7 +23,44 @@ Windows 本地 Qwen3-ASR 实时语音记录插件，当前适配 **Typora 1.14.1
 5. “暂停”会停止采集并处理尾句，“继续录音”沿用同一会话；暂停不计入有效录音时长。电平条显示输入大小，持续安静会提示暂未检测到声音。
 6. 点击“结束录音”，等待识别、润色、入文和保存完成。无法确定的长句边界需要确认插入或忽略。
 
-`Ctrl+Alt+R` 收起/展开面板。应用不自动开始录音。
+右上角“−”缩小面板；右下角“语音记录”或 `Ctrl+Alt+R` 重新展开，录音不受影响。实时识别预览位于“本地识别 · 在线润色后自动补充”正下方。
+
+服务运行时显示“终止服务”：先保存当前录音并关闭转写服务，再关闭本项目启动且身份匹配的模型进程。未完成的识别和润色保留在本地，重新启动后点击“恢复记录”继续处理。外部启动的模型及没有新版启动记录的旧模型不会被结束。应用不自动开始录音。
+
+## 安装发布包 v0.3.2
+
+解压 `TyporaRealtimeASR-v0.3.2-win-x64.zip` 到长期保留的目录。发布包包含自包含服务，不需要安装 .NET；模型权重和 llama-server 仍需自行准备。
+
+安装前准备：Windows x64、Typora 1.14.10、支持 Qwen3-ASR 音频输入的 `llama-server.exe`、主模型 GGUF 和配套 mmproj GGUF。模型路径可复用已有文件，不必放进插件目录。安装包中的 `config.example.json` 提供完整字段示例；`device` 默认使用 `Vulkan0`，应填写本机实际设备。
+
+1. 复制 `config.example.json` 为 `config.local.json`，填写本机模型和 llama-server 路径。
+2. 关闭 Typora，右键以管理员身份运行 `install.cmd`；自定义 Typora 路径可使用下方 PowerShell 安装命令。
+3. 重启 Typora，点击“启动服务”。在线润色密钥需在面板配置。
+
+也可以在管理员 PowerShell 中进入解压目录后执行：
+
+```powershell
+Copy-Item .\config.example.json .\config.local.json
+notepad .\config.local.json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\install-plugin.ps1
+```
+
+上述复制配置步骤只用于首次安装；升级不要覆盖已有配置。非默认安装目录需加 `-TyporaPath 'D:\Apps\Typora'`。管理员权限仅用于写入 Typora 安装目录，平时启动服务和录音不需要管理员权限。插件保存了服务目录的绝对路径，安装后请保留解压目录；移动目录后需重新安装插件。
+
+安装成功后，Typora 右下角出现“语音记录”，展开后右上角显示“−”。点击“启动服务”，待状态为“转写服务与模型就绪”后即可录音。先保存目标 Markdown，再配置在线润色参数；没有在线配置时，原始录音和逐字稿仍会保存，润色正文不会自动补写。
+
+升级时保留原目录的 `config.local.json` 与 `.asr`，停止旧服务后覆盖发布文件并重新运行安装入口。旧版服务不支持面板安全终止时，应先结束录音并等待处理及保存完成，再手动关闭旧服务进程。
+
+推荐升级顺序：
+
+1. 结束录音，等待待识别、待润色和未保存数量归零，保存所有打开的文档。
+2. 点击“终止服务”，关闭 Typora。旧版没有此按钮时，确认录音和处理已经结束后，在任务管理器结束 `TyporaAsr.Service.exe`。
+3. 备份原安装目录，将新版文件覆盖到同一目录，保留 `config.local.json`、`.asr` 及文档同目录的录音和逐字稿。
+4. 以管理员身份重新运行 `install.cmd`，重新打开 Typora 并启动服务；旧会话使用“恢复记录”继续。
+
+遇到 `Access denied` / “拒绝访问”时，请在管理员终端运行安装命令并接受 Windows UAC 提示。面板未出现时，先完全退出再打开 Typora；Typora 更新后可能需要重新安装入口。模型未就绪时核对本机路径和设备，查看 `artifacts/model.stderr.log`；服务启动失败查看 `artifacts/service.stderr.log`，终止失败查看 `artifacts/stop.stderr.log`。
+
+开发者可执行 `powershell -ExecutionPolicy Bypass -File tools/release.ps1` 重新生成 ZIP 及 SHA-256 校验文件；构建使用独立目录，不覆盖正在运行的服务。
 
 ## 润色、逐字稿与保存状态
 

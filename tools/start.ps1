@@ -20,6 +20,7 @@ if(!$ready -and !$SkipModel){
     $arguments=@('-m',('"'+$cfg.model+'"'),'--mmproj',('"'+$cfg.mmproj+'"'),'--alias','qwen3-asr','--host','127.0.0.1','--port','18081','-c','4096','-np','1','-ngl','99','-b','256','-ub','256','-t','8','--device',$cfg.device,'--mmproj-device',$cfg.device,'--no-webui')
     $modelProcess=Start-Process -FilePath (Join-Path $cfg.llamaDirectory 'llama-server.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logs 'model.stdout.log') -RedirectStandardError (Join-Path $logs 'model.stderr.log')
     Set-Content (Join-Path $dataRoot 'model.pid') $modelProcess.Id
+    @{pid=$modelProcess.Id;started=$modelProcess.StartTime.ToUniversalTime().Ticks.ToString();path=$modelProcess.Path} | ConvertTo-Json | Set-Content (Join-Path $dataRoot 'model-process.json') -Encoding UTF8
     for($attempt=0;$attempt -lt 90;$attempt++){
         try{if((Invoke-RestMethod ($cfg.asrEndpoint+'/health') -TimeoutSec 2).status -eq 'ok'){$ready=$true;break}}catch{}
         Start-Sleep -Seconds 1
