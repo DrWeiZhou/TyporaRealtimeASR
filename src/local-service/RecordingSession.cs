@@ -1,7 +1,4 @@
-using NAudio.Wave;
-using NAudio.CoreAudioApi;
-
-namespace TyporaAsr;
+﻿namespace TyporaAsr;
 
 public sealed class RecordingSession : IAsyncDisposable
 {
@@ -9,12 +6,11 @@ public sealed class RecordingSession : IAsyncDisposable
     private readonly Ledger ledger;
     private readonly AudioStore audio;
     private readonly AsrClient asr;
+    private readonly IAudioCaptureFactory audioFactory;
     private readonly Segmenter segmenter=Segmenter.ForNotes();
     private readonly CancellationTokenSource cancel=new();
     private readonly Task worker;
-    private WasapiCapture? capture;
-    private MMDevice? endpoint;
-    private PcmConverter? converter;
+    private IAudioCapture? capture;
     private AudioSegment? preview;
     private CancellationTokenSource? previewCancellation;
     private long lastPreview;
@@ -36,8 +32,9 @@ public sealed class RecordingSession : IAsyncDisposable
     public string Error {get;private set;}="";
     public object? Hypothesis {get;private set;}
     public bool Recording=>recording;
-    public RecordingSession(string id,string document,string path,string root,Ledger ledger,AsrClient asr,bool recover=false) {
+    public RecordingSession(string id,string document,string path,string root,Ledger ledger,AsrClient asr,bool recover=false,IAudioCaptureFactory? audioFactory=null) {
         Id=id;DocumentId=document;Path=path;this.ledger=ledger;this.asr=asr;
+        this.audioFactory=audioFactory??new WasapiAudioCaptureFactory();
         ledger.CreateSession(id,document,path);
         audio=new AudioStore(SessionFiles.PrepareAudio(root,id,path));
         try{ledger.ExportTranscript(id);}catch{audio.Dispose();throw;}
@@ -55,21 +52,29 @@ public sealed class RecordingSession : IAsyncDisposable
             var wasPaused=paused;paused=false;pausing=false;captureError="";
             try {
             stopped=new(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var enumerator=new MMDeviceEnumerator();
-            endpoint=device<0?enumerator.GetDefaultAudioEndpoint(DataFlow.Capture,Role.Console):enumerator.EnumerateAudioEndPoints(DataFlow.Capture,DeviceState.Active)[device];
-            capture=new WasapiCapture(endpoint);
-            converter=new PcmConverter(capture.WaveFormat);
-            capture.DataAvailable+=(_,e)=>{
-                try {Accept(converter.Push(e.Buffer,0,e.BytesRecorded));}
-                catch(Exception error) {captureError="录音保存失败: "+error.Message;capture?.StopRecording();}
+            var next=audioFactory.Create();
+            next.PcmAvailable+=pcm=>{
+                try {Accept(pcm);}
+                catch(Exception error) {captureError="录音保存失败: "+error.Message;next.RequestStop();}
             };
-            capture.RecordingStopped+=(_,e)=>{
-                lock(gate) {recording=false;try{if(e.Exception!=null)captureError="麦克风采集停止，请结束会话并检查设备";Accept(converter.Flush());FinalizeTail(!pausing || e.Exception!=null);paused=pausing && !inputClosed;Rms=Peak=0;stopped.TrySetResult();}catch(Exception error){captureError=error.Message;inputClosed=true;paused=false;Rms=Peak=0;stopped.TrySetException(error);}}
+            next.Stopped+=ex=>{
+                lock(gate) {
+                    recording=false;
+                    try{
+                        var dataError=next.TakeDataError();
+                        if(dataError!=null && captureError.Length==0)captureError="录音保存失败: "+dataError.Message;
+                        else if(ex!=null)captureError="录音采集停止异常，请重试或更换设备";
+                        Accept(next.Flush());
+                        FinalizeTail(!pausing || ex!=null);
+                        paused=pausing && !inputClosed;Rms=Peak=0;stopped.TrySetResult();
+                    }catch(Exception error){captureError=error.Message;inputClosed=true;paused=false;Rms=Peak=0;stopped.TrySetException(error);}
+                }
             };
+            capture=next;
             ledger.BeginSpan(Id,audio.Samples,DateTimeOffset.Now);
             recording=true;
-            capture.StartRecording();
-            } catch {recording=false;paused=wasPaused;capture?.Dispose();capture=null;endpoint?.Dispose();endpoint=null;throw;}
+            capture.Start(device);
+            } catch {recording=false;paused=wasPaused;capture?.Dispose();capture=null;throw;}
         }
     }
     public void Accept(short[] pcm) {
@@ -91,10 +96,10 @@ public sealed class RecordingSession : IAsyncDisposable
     public async Task Resume(int device){await lifecycle.WaitAsync();try{if(!paused)throw new InvalidOperationException("会话未暂停，不能续录");Start(device);}finally{lifecycle.Release();}}
     private async Task StopCapture(bool pause) {
         await lifecycle.WaitAsync();try{
-            WasapiCapture? device;lock(gate){if(inputClosed){if(pause)throw new InvalidOperationException("录音已结束");return;}if(pause && paused)return;pausing=pause;device=capture;}
-            if(device!=null && recording){device.StopRecording();await stopped.Task.WaitAsync(TimeSpan.FromSeconds(10));}
+            IAudioCapture? device;lock(gate){if(inputClosed){if(pause)throw new InvalidOperationException("录音已结束");return;}if(pause && paused)return;pausing=pause;device=capture;}
+            if(device!=null && recording){device.RequestStop();await stopped.Task.WaitAsync(TimeSpan.FromSeconds(10));}
             else lock(gate){FinalizeTail(!pause);paused=pause;}
-            lock(gate){capture?.Dispose();capture=null;endpoint?.Dispose();endpoint=null;Rms=Peak=0;if(!pause){inputClosed=true;paused=false;}}
+            lock(gate){capture?.Dispose();capture=null;Rms=Peak=0;if(!pause){inputClosed=true;paused=false;}}
         }finally{lifecycle.Release();}
     }
     private double BufferedSeconds {get{lock(gate){return segmenter.ActiveStart is long start?(audio.Samples-start)/16000.0:0;}}}
@@ -131,5 +136,5 @@ public sealed class RecordingSession : IAsyncDisposable
             catch(Exception e){Error=e.Message;await Task.Delay(1000);}
         }
     }
-    public async ValueTask DisposeAsync(){await Stop();cancel.Cancel();await worker;capture?.Dispose();endpoint?.Dispose();audio.Dispose();cancel.Dispose();}
+    public async ValueTask DisposeAsync(){await Stop();cancel.Cancel();await worker;capture?.Dispose();audio.Dispose();cancel.Dispose();}
 }

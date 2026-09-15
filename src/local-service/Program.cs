@@ -1,8 +1,6 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
-using NAudio.Wave;
-using NAudio.CoreAudioApi;
 using TyporaAsr;
 
 var builder=WebApplication.CreateBuilder(args);
@@ -19,6 +17,7 @@ using var http=new HttpClient {Timeout=TimeSpan.FromSeconds(100)};
 var endpoint=builder.Configuration["AsrEndpoint"] ?? "http://127.0.0.1:18081";
 var asr=new AsrClient(http,endpoint,builder.Configuration["AsrModel"] ?? "qwen3-asr");
 var polishSettings=new PolishSettings(root);
+var audioFactory=new WasapiAudioCaptureFactory();
 using var onlineHttp=new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(65)};
 var polishPipeline=new PolishPipeline(ledger,polishSettings,onlineHttp);
 using var pipelineCancel=new CancellationTokenSource();
@@ -57,11 +56,7 @@ app.MapGet("/model-health",async()=>{try{using var deadline=new CancellationToke
 app.MapGet("/polish/config",()=>polishSettings.Public());
 app.MapPost("/polish/config",(PolishConfig config)=>{polishSettings.Save(config);return Results.Ok(polishSettings.Public());});
 app.MapPost("/polish/test",async(HttpContext context)=>{var config=polishSettings.Current()??throw new ArgumentException("请先保存润色配置");try{await PolishPipeline.Request(onlineHttp,config,"这是一条连接测试文本。",context.RequestAborted);return Results.Ok(new {ok=true});}catch{throw new ArgumentException("在线连接测试失败，请检查地址、模型、密钥与网络");}});
-app.MapGet("/devices",()=>{
-    using var enumerator=new MMDeviceEnumerator();var devices=enumerator.EnumerateAudioEndPoints(DataFlow.Capture,DeviceState.Active);
-    var list=new List<object>{new {id=-1,name="系统默认麦克风"}};
-    for(var i=0;i<devices.Count;i++){using var device=devices[i];list.Add(new {id=i,name=device.FriendlyName});}return list;
-});
+app.MapGet("/devices",()=>audioFactory.EnumerateDevices().Select(d=>new {id=d.Id,name=d.Name,kind=d.Kind}).ToList());
 app.MapGet("/sessions",()=>ledger.Sessions());
 app.MapPost("/sessions",async(StartRequest request,HttpContext context)=>{
     if(!Guid.TryParse(request.SessionId,out _) || !Guid.TryParse(request.DocumentId,out _))throw new ArgumentException("Invalid session/document id");
@@ -77,7 +72,7 @@ app.MapPost("/sessions",async(StartRequest request,HttpContext context)=>{
         using(var health=await http.GetAsync(endpoint.TrimEnd('/')+"/health"))health.EnsureSuccessStatusCode();
         // Warm the complete audio path; short silence may yield no text, which is harmless here.
         try {await asr.Recognize(new short[16000],context.RequestAborted);} catch(InvalidDataException){}
-        var session=new RecordingSession(request.SessionId,request.DocumentId,path,root,ledger,asr);
+        var session=new RecordingSession(request.SessionId,request.DocumentId,path,root,ledger,asr,audioFactory:audioFactory);
         ledger.EnablePolish(session.Id);
         sessions[session.Id]=session;
         try {session.Start(request.Device);} catch {sessions.TryRemove(session.Id,out _);await session.DisposeAsync();throw;}
@@ -89,7 +84,7 @@ app.MapPost("/sessions/{id}/recover",async(string id,HttpContext context)=>{
         if(shuttingDown)throw new InvalidOperationException("服务正在终止");
         var stored=ledger.Session(id)??throw new ArgumentException("会话不存在");Claim(stored.Path,Client(context));
         ledger.EnablePolish(id);
-        var s=sessions.GetOrAdd(id,_=>new RecordingSession(id,stored.Document,stored.Path,root,ledger,asr,true));return Results.Ok(s.Status());
+        var s=sessions.GetOrAdd(id,_=>new RecordingSession(id,stored.Document,stored.Path,root,ledger,asr,true,audioFactory));return Results.Ok(s.Status());
     }finally{sessionGate.Release();}
 });
 app.MapGet("/sessions/{id}",(string id,HttpContext c)=>Owned(id,c).Status());
