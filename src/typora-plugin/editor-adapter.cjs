@@ -23,19 +23,14 @@ class EditorAdapter {
   // Document content is the source of truth for list numbering so a new/cleared file restarts at 1.
   syncNumberFromDocument() {
     let max=0;
-    const walk=node=>{
-      if(!node)return;
-      if(node.get('type')==='list' && node.get('style')==='ol'){
-        const start=Number(node.get('start'));
-        const begin=Number.isFinite(start)&&start>0?start:1;
-        let items=0;
-        for(const child of node.get('children')||[])if(child.get('type')==='list_item')items++;
-        if(items>0)max=Math.max(max,begin+items-1);
-        else max=Math.max(max,begin-1);
-      }
-      for(const child of node.get('children')||[])walk(child);
-    };
-    for(const n of this.nodes())walk(n);
+    // Prefer the live DOM; Typora nodes do not expose iterable get('children').
+    const ols=[...this.w.document.querySelectorAll('#write ol')];
+    for(const ol of ols){
+      const start=Number(ol.getAttribute('start')||ol.start||1);
+      const begin=Number.isFinite(start)&&start>0?start:1;
+      const items=ol.querySelectorAll(':scope > li').length;
+      if(items>0)max=Math.max(max,begin+items-1);
+    }
     this.state.number=max;
   }
   persist(){const fs=this.w.reqnode('fs'),path=this.w.reqnode('path');fs.mkdirSync(path.dirname(this.stateFile),{recursive:true});fs.writeFileSync(this.stateFile+'.tmp',JSON.stringify(this.state));fs.renameSync(this.stateFile+'.tmp',this.stateFile);}
