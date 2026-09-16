@@ -19,3 +19,4 @@ __pycache__/
 *.pyc
 /examples/
 *.逐字稿-*.md
+/Claude outputs/
