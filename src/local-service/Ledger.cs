@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace TyporaAsr;
 
-public sealed record TranscriptEvent(long Seq,string EventId,string SessionId,long Start,long End,string Text,bool NeedsReview,string State,string PolishState="ready");
+public sealed record TranscriptEvent(long Seq,string EventId,string SessionId,long Start,long End,string Text,bool NeedsReview,string State,string PolishState="ready",PolishBlock[]? Blocks=null);
 public sealed partial class Ledger : IDisposable
 {
     private readonly SqliteConnection db;
@@ -31,15 +31,17 @@ public sealed partial class Ledger : IDisposable
         lock(gate) {
             using var transaction=db.BeginTransaction();
             using var c=db.CreateCommand(); c.Transaction=transaction;
-            c.CommandText="INSERT OR IGNORE INTO events(id,session,start,end,text,review,state) VALUES($0,$1,$2,$3,$4,$5,CASE WHEN length(trim($4))=0 THEN 'no_text' ELSE 'recognized' END); UPDATE jobs SET state='done',error='' WHERE id=$0;";
-            object[] values=[id,session,start,end,text,review?1:0]; for(var i=0;i<values.Length;i++) c.Parameters.AddWithValue("$"+i,values[i]);
+            c.CommandText="INSERT OR IGNORE INTO events(id,session,start,end,text,review,state,at) VALUES($0,$1,$2,$3,$4,$5,CASE WHEN length(trim($4))=0 THEN 'no_text' ELSE 'recognized' END,$6); UPDATE jobs SET state='done',error='' WHERE id=$0;";
+            object[] values=[id,session,start,end,text,review?1:0,DateTimeOffset.UtcNow.ToUnixTimeSeconds()]; for(var i=0;i<values.Length;i++) c.Parameters.AddWithValue("$"+i,values[i]);
             c.ExecuteNonQuery(); transaction.Commit();
             ExportTranscript(session);
         }
     }
     public void Acknowledge(string session,string id,string state) {
         if(state is not ("applying" or "applied" or "saved" or "deleted" or "reviewed")) throw new ArgumentException("Invalid acknowledgement");
-        Execute("UPDATE events SET state=$2 WHERE session=$0 AND id=$1 AND state!='deleted' AND (state!='saved' OR $2='deleted')",session,id,state);
+        // Window ids carry the editor state for all member utterances.
+        var table=id.StartsWith("win:",StringComparison.Ordinal)?"polish_windows":"events";
+        Execute($"UPDATE {table} SET state=$2 WHERE session=$0 AND id=$1 AND state!='deleted' AND (state!='saved' OR $2='deleted')",session,id,state);
     }
     public List<TranscriptEvent> Events(string session,long after) {
         lock(gate) {

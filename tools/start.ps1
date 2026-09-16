@@ -13,7 +13,12 @@ $dataRoot=Join-Path $projectRoot '.asr'
 $logs=Join-Path $projectRoot 'artifacts'
 New-Item -ItemType Directory -Force -Path $dataRoot,$logs | Out-Null
 $ready=$false
-try{$ready=(Invoke-RestMethod ($cfg.asrEndpoint+'/health') -TimeoutSec 2).status -eq 'ok'}catch{}
+# 面板启用了在线 ASR 时不需要本地模型。
+$online=$false
+$modePath=Join-Path $dataRoot 'asr-mode.json'
+if(Test-Path -LiteralPath $modePath){try{$online=[bool](Get-Content -LiteralPath $modePath -Raw | ConvertFrom-Json).online}catch{}}
+if($online){$ready=$true;Write-Host '已启用在线 ASR，跳过本地模型。'}
+else{try{$ready=(Invoke-RestMethod ($cfg.asrEndpoint+'/health') -TimeoutSec 2).status -eq 'ok'}catch{}}
 if(!$ready -and !$SkipModel){
     if($cfg.asrEndpoint -ne 'http://127.0.0.1:18081'){throw '自定义模型端点请先自行启动，然后使用 -SkipModel'}
     foreach($asset in @($cfg.model,$cfg.mmproj,(Join-Path $cfg.llamaDirectory 'llama-server.exe'))){if(!(Test-Path -LiteralPath $asset)){throw "找不到 $asset"}}

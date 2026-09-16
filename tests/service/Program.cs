@@ -56,8 +56,8 @@ Check("Note segments accumulate short phrases and flush at a natural pause",()=>
  Equal(0,list.Count);list.AddRange(vad.Push(new short[9600]));Equal(1,list.Count);Equal(false,list[0].NeedsReview);
 });
 Check("Note segments have bounded latency and continuous speech never waits for review",()=>{
- var vad=Segmenter.ForNotes();var first=vad.Push(Enumerable.Repeat((short)4000,320000).ToArray());Equal(1,first.Count);Equal(false,first[0].NeedsReview);
- var second=vad.Push(Enumerable.Repeat((short)4000,320000).ToArray());Equal(1,second.Count);Equal(false,second[0].NeedsReview);Equal(first[0].End,second[0].Start);vad.Push(Enumerable.Repeat((short)4000,8000).ToArray());Equal(false,vad.Flush()!.NeedsReview);
+ var vad=Segmenter.ForNotes();var first=vad.Push(Enumerable.Repeat((short)4000,192000).ToArray());Equal(1,first.Count);Equal(false,first[0].NeedsReview);
+ var second=vad.Push(Enumerable.Repeat((short)4000,192000).ToArray());Equal(1,second.Count);Equal(false,second[0].NeedsReview);Equal(first[0].End,second[0].Start);vad.Push(Enumerable.Repeat((short)4000,8000).ToArray());Equal(false,vad.Flush()!.NeedsReview);
  var shortNote=Segmenter.ForNotes();shortNote.Push(Enumerable.Repeat((short)4000,8000).ToArray());Equal(1,shortNote.Push(new short[40000]).Count);
 });
 Check("Ledger persists events, deduplicates finals and preserves deletion state", () => {
@@ -158,10 +158,12 @@ if(args.Length==3 && args[0]=="--seed-polish-fixture"){
  File.WriteAllText(args[2],$"# 润色集成测试\n\n人工笔记起始内容\n\n<!-- asr-insert:{doc} -->\n");db.CreateSession(session,doc,Path.GetFullPath(args[2]));db.EnablePolish(session);
  db.BeginSpan(session,0,DateTimeOffset.Parse("2026-09-12T10:00:00+08:00"));db.EndSpan(session,32000);
  db.AddFinal(session,session+":0",0,16000,"原始口语一",false);db.AddFinal(session,session+":16000",16000,32000,"原始口语二",false);
- foreach(var e in db.Events(session,0)){db.SnapshotPolish(e.EventId,"fixture-only");db.CompletePolish(e.EventId,e.Start==0?"已润色的第一句话。":"已润色的第二句话。");}
+ db.CutWindows(_=>true,DateTimeOffset.UtcNow);var fixtureJob=db.NextPolish()??throw new Exception("Fixture window missing");
+ db.SnapshotPolish(fixtureJob.Id,"fixture-only");db.CompletePolish(fixtureJob.Id,[new PolishBlock("new","润色集成话题一",["已润色的第一句话。"]),new PolishBlock("new","润色集成话题二",["已润色的第二句话。"])]);
  db.AddFinal(session,session+":32000",32000,48000,"不能入文的未润色原始内容",false);
  File.WriteAllText(Path.Combine(args[1],"integration-session.json"),System.Text.Json.JsonSerializer.Serialize(new {sessionId=session,documentId=doc}));Console.WriteLine("PASS prepared isolated editor fixture");
 }
 try {await PipelineTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL pipeline: "+e);}
+try {await OnlineAsrTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL online ASR: "+e);}
 try {await WavTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL WAV: "+e.Message);}
 Environment.ExitCode = failures == 0 ? 0 : 1;

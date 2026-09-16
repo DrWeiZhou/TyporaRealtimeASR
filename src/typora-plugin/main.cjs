@@ -16,7 +16,7 @@ module.exports=function mount(w,config){
  #asr-panel h3{font-size:20px;margin:0 0 12px;padding-right:80px}#asr-panel #asr-minimize,#asr-panel #asr-close{position:absolute;top:12px;margin:0;font-size:18px;line-height:1;padding:7px;width:32px;height:32px}#asr-panel #asr-minimize{right:52px}#asr-panel #asr-close{right:14px}#asr-panel.asr-minimized{width:220px;max-height:none;overflow:hidden;padding:10px 12px;border-radius:6px}#asr-panel.asr-minimized>:not(h3):not(#asr-minimize):not(#asr-close){display:none}#asr-panel.asr-minimized h3{font-size:14px;line-height:32px;margin:0;white-space:nowrap}#asr-panel.asr-minimized #asr-minimize,#asr-panel.asr-minimized #asr-close{top:10px}#asr-preview{margin-top:10px}#asr-panel p{margin:10px 0;line-height:1.65}#asr-panel button,#asr-panel select{padding:7px 10px;margin:4px 4px 4px 0;border:1px solid #8886;border-radius:6px;background:transparent;color:inherit;cursor:pointer}#asr-panel button:disabled{opacity:.4;cursor:default}
  #asr-preview{padding:12px;border-left:3px solid #458a71;min-height:65px;background:#458a7110;white-space:pre-wrap}#asr-status{color:#697870;font-size:12px}#asr-review>div{border-top:1px solid #8884;margin-top:12px;padding-top:8px}#asr-panel small{color:#777}#asr-devices{max-width:100%}
  `;d.head.appendChild(style);
- const panel=d.createElement('section');panel.id='asr-panel';panel.innerHTML=`<h3>语音记录</h3><button id="asr-minimize" title="缩小面板" aria-label="缩小面板" aria-expanded="true">−</button><button id="asr-close" title="关闭窗口" aria-label="关闭窗口">×</button><small>本地识别 · 在线润色后自动补充</small><div id="asr-preview" role="status">当前句将在这里实时显示。</div><p id="asr-target">尚未绑定文档</p><select id="asr-devices" aria-label="录音设备"><option value="-1">默认麦克风</option></select><div><button id="asr-start">开始录音</button><button id="asr-pause" disabled>暂停</button><button id="asr-stop" disabled>结束录音</button><button id="asr-recover">恢复记录</button></div><p id="asr-status">准备就绪。Ctrl+Alt+R 展开或缩小面板。</p><div id="asr-review"></div>`;
+ const panel=d.createElement('section');panel.id='asr-panel';panel.innerHTML=`<h3>语音记录</h3><button id="asr-minimize" title="缩小面板" aria-label="缩小面板" aria-expanded="true">−</button><button id="asr-close" title="关闭窗口" aria-label="关闭窗口">×</button><small id="asr-mode">正在检测识别方式 · 在线润色后自动补充</small><div id="asr-preview" role="status">当前句将在这里实时显示。</div><p id="asr-target">尚未绑定文档</p><select id="asr-devices" aria-label="录音设备"><option value="-1">默认麦克风</option></select><div><button id="asr-start">开始录音</button><button id="asr-pause" disabled>暂停</button><button id="asr-stop" disabled>结束录音</button><button id="asr-recover">恢复记录</button></div><p id="asr-status">准备就绪。Ctrl+Alt+R 展开或缩小面板。</p><div id="asr-review"></div>`;
  const toggle=d.createElement('button');toggle.id='asr-toggle';toggle.textContent='语音记录';d.body.append(panel,toggle);
  const $=id=>panel.querySelector('#'+id);
  const status=text=>{$('asr-status').textContent=text;lastStatus=text};
@@ -75,8 +75,10 @@ async function start(){
  function review(event){
    const area=$('asr-review');if(area.querySelector(`[data-event="${event.eventId}"]`))return;
    const card=d.createElement('div');card.dataset.event=event.eventId;const text=d.createElement('p');text.textContent=event.text;
-   const note=d.createElement('small');note.textContent=event.needsReview?'长句边界需要确认':'此段可能已插入或被人工删除，请核对后选择';
-   const insert=d.createElement('button');insert.textContent='插入此段';insert.onclick=async()=>{if(serviceStopping||busy||controlBusy)return;busy=true;try{const result=await controller.apply(event,true);if(result!=='deferred'){pending.delete(event.eventId);toSave.set(event.eventId,event);card.remove()}}catch(e){showError(e)}finally{busy=false}};
+   const failed=event.polishState==='failed';
+   const note=d.createElement('small');note.textContent=failed?'在线润色多次失败：可插入未润色原文、忽略，或点击“重试润色”':event.needsReview?'长句边界需要确认':'此段可能已插入或被人工删除，请核对后选择';
+   const target=failed?{...event,polishState:'ready',blocks:[{topic:'continue',title:'',paragraphs:[event.text]}]}:event;
+   const insert=d.createElement('button');insert.textContent=failed?'插入原文':'插入此段';insert.onclick=async()=>{if(serviceStopping||busy||controlBusy)return;busy=true;try{const result=await controller.apply(target,true);if(result!=='deferred'){pending.delete(event.eventId);toSave.set(event.eventId,event);card.remove()}}catch(e){showError(e)}finally{busy=false}};
    const ignore=d.createElement('button');ignore.textContent='忽略';ignore.onclick=async()=>{if(serviceStopping||busy||controlBusy)return;busy=true;try{await ack(event.eventId,'deleted');pending.delete(event.eventId);card.remove()}catch(e){showError(e)}finally{busy=false}};
    card.append(note,text,insert,ignore);area.append(card);
  }
@@ -88,15 +90,16 @@ async function start(){
     if(retrying.size&&session.polish?.completed!==lastPolishCompleted)after=0;lastPolishCompleted=session.polish?.completed;
     $('asr-stop').disabled=!(session.recording||session.paused);$('asr-pause').disabled=!(session.recording||session.paused);$('asr-pause').textContent=session.paused?'继续录音':'暂停';$('asr-start').disabled=session.recording||session.paused||session.pending>0||awaitingPolish(session)>0||pending.size>0||toSave.size>0;extra.render(session,pending.size,toSave.size);
     if(session.hypothesis)$('asr-preview').textContent=session.hypothesis.text;
+    else if(session.recording&&session.lastFinal)$('asr-preview').textContent=session.lastFinal;
     else $('asr-preview').textContent=session.paused?'已暂停。识别与润色继续处理已有音频。':session.recording?'等待当前句识别…':'录音已结束。';
-    if(pending.size<200){const revision=replayRevision;const events=await client.request('GET',`/sessions/${session.sessionId}/events?after=${after}`);if(revision!==replayRevision)return;for(const e of events){if(e.polishState==='failed')retrying.add(e.eventId);pending.set(e.eventId,e);after=Math.max(after,e.seq)}}
+    if(pending.size<200){const revision=replayRevision;const events=await client.request('GET',`/sessions/${session.sessionId}/events?after=${after}`);if(revision!==replayRevision)return;for(const e of events){if(e.polishState==='failed')retrying.add(e.eventId);else $('asr-review').querySelector(`[data-event="${e.eventId}"]`)?.remove();pending.set(e.eventId,e);after=Math.max(after,e.seq)}}
     if(adapter.path()!==adapter.boundPath){status('已切换文档；录音继续，自动入文已暂停。');return;}
     if(!adapter.checkDisk()){status('检测到磁盘内容变化，已暂停补写。请处理文件冲突后重新恢复会话。');return;}
     if(!adapter.safe()){status('等待中文输入完成或返回普通编辑模式，转写继续保留。');return;}
     for(const id of observed){if(!adapter.contains(id)){await ack(id,'deleted');observed.delete(id);toSave.delete(id)}}
     for(const [id,event] of pending){
       const result=await controller.apply(event);
-      if(result==='failed'){retrying.add(id);pending.delete(id);continue;}
+      if(result==='failed'){retrying.add(id);pending.delete(id);if(event.text)review(event);continue;}
       retrying.delete(id);
       if(result==='deferred')break;
       if(result==='review'){review(event);break;}

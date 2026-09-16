@@ -1,6 +1,10 @@
 'use strict';
 const normalize=s=>s.replace(/^\uFEFF/,'').replace(/\r\n/g,'\n');
 const escapeText=s=>s.replace(/[\\`*_{}\[\]<>#]/g,'\\$&').replace(/[\r\n]+/g,' ');
+// Paragraphs must not be re-parsed as list items when they start with a number or bullet.
+const escapeParagraph=s=>escapeText(String(s).trim()).replace(/^(\d+)([.)])/,'$1\\$2').replace(/^([-+])(\s)/,'\\$1$2');
+const JOIN_BELOW=150,JOIN_MAX=350;
+const orderedItem=(start,text)=>({type:'list',style:'ol',start,isFixed:false,children:[{type:'list_item',children:[{type:'paragraph',text}]}]});
 class EditorAdapter {
   constructor(w,documentId,stateRoot) {
     this.w=w;this.e=w.File.editor;this.documentId=documentId;this.boundPath=this.path();this.composing=false;this.conflict=false;
@@ -34,12 +38,13 @@ class EditorAdapter {
     this.state.number=max;
   }
   persist(){const fs=this.w.reqnode('fs'),path=this.w.reqnode('path');fs.mkdirSync(path.dirname(this.stateFile),{recursive:true});fs.writeFileSync(this.stateFile+'.tmp',JSON.stringify(this.state));fs.renameSync(this.stateFile+'.tmp',this.stateFile);}
-  transaction(anchor,specs,before=true) {
+  // Returns the inserted top-level nodes. removeAnchor replaces the anchor (used to extend the previous paragraph) in the same undo step.
+  transaction(anchor,specs,before=true,removeAnchor=false) {
     const e=this.e,U=e.undo.UndoManager;const scroll=this.w.document.querySelector('content');
     const top=scroll?.scrollTop,left=scroll?.scrollLeft;
     let cursor;try{cursor=e.selection.buildUndo()}catch{cursor=e.lastCursor}
     e.undo.endSnap(true);
-    const command=U.makeEmptyCommand(cursor);let previous=anchor;
+    const command=U.makeEmptyCommand(cursor);let previous=anchor;const inserted=[];
     for(const spec of specs) {
       const build=spec=>{
         const {children,...attributes}=spec;const node=new anchor.constructor(attributes);
@@ -49,11 +54,13 @@ class EditorAdapter {
       const node=build(spec);
       if(before){anchor.addBefore(node);e.findElemById(anchor.cid).before(node.toHTML());}
       else {previous.addAfter(node);e.findElemById(previous.cid).after(node.toHTML());previous=node;}
-      U.addUndoForInsert(command,node);
+      U.addUndoForInsert(command,node);inserted.push(node);
     }
+    if(removeAnchor){U.addUndoForRemove(command,anchor);const element=e.findElemById(anchor.cid);anchor.remove();element.remove();}
     if(cursor)command.redo.push(cursor);
     e.undo.register(command);
     if(scroll){scroll.scrollTop=top;scroll.scrollLeft=left;}
+    return inserted;
   }
   bind() {
     if(this.path()!==this.boundPath || this.composing || this.e.isIME || this.e.sourceView.inSourceMode || this.w.File.isLocked)throw new Error('请在普通编辑模式中绑定已保存的 Markdown');
@@ -76,13 +83,32 @@ class EditorAdapter {
     }
     if(!this.e.nodeMap.getLast())throw new Error('请先在文档中写入一个标题并保存');
   }
+  // Window results: a new topic opens a numbered item (bold title); its paragraphs and continuations follow as plain paragraphs.
+  // A continuation joins the previous inserted paragraph while that paragraph is short, untouched and still the last block,
+  // so small low-latency windows still read as coherent paragraphs.
   insert(event) {
     if(!this.safe())throw new Error('编辑状态改变，等待安全插入');
     if(!/^[a-zA-Z0-9:_-]+$/.test(event.eventId))throw new Error('Invalid event id');
-    const number=this.state.number+1;
+    let number=this.state.number;const specs=[];let anchor=this.e.nodeMap.getLast(),replace=false;
+    if(Array.isArray(event.blocks)){
+      event.blocks.forEach((block,index)=>{
+        if(block.topic==='new'){number++;specs.push(orderedItem(number,`**${escapeText(String(block.title||'').trim()||'记录')}**`));}
+        const paragraphs=(block.paragraphs||[]).map(p=>String(p).trim()).filter(Boolean).map(escapeParagraph);
+        if(index===0&&block.topic==='continue'&&paragraphs.length&&this.canJoin(anchor,paragraphs[0])){paragraphs[0]=this.lastParagraph.text+paragraphs[0];replace=true;}
+        for(const text of paragraphs)specs.push({type:'paragraph',text});
+      });
+    } else {number++;specs.push(orderedItem(number,escapeText(event.text)));}
     this.state.number=number;this.state.events[event.eventId]='pending';this.persist();
-    this.transaction(this.e.nodeMap.getLast(),[{type:'list',style:'ol',start:number,isFixed:false,children:[{type:'list_item',children:[{type:'paragraph',text:escapeText(event.text)}]}]}],false);
+    if(specs.length){
+      const result=this.transaction(anchor,specs,false,replace),nodes=Array.isArray(result)?result:[];
+      const last=nodes[nodes.length-1];
+      this.lastParagraph=last&&last.get('type')==='paragraph'?{cid:last.cid,text:last.get('text')}:null;
+    }
     (this.inserted||=new Set()).add(event.eventId);
+  }
+  canJoin(anchor,next){
+    const last=this.lastParagraph;
+    return !!(last&&anchor&&anchor.cid===last.cid&&anchor.get('type')==='paragraph'&&anchor.get('text')===last.text&&last.text.length<JOIN_BELOW&&last.text.length+next.length<=JOIN_MAX);
   }
 
   checkDisk() {

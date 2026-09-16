@@ -16,15 +16,11 @@ public sealed class AsrOutput
     }
 }
 
-public sealed class AsrClient(HttpClient http, string endpoint, string model)
+public sealed class AsrClient(HttpClient http, string endpoint, string model) : ISpeechRecognizer
 {
-    private readonly SemaphoreSlim inferenceGate=new(1,1);
-    public async Task<string> Recognize(short[] pcm, CancellationToken ct)
-    {
-        await inferenceGate.WaitAsync(ct);
-        try{return await Infer(pcm,ct);}finally{inferenceGate.Release();}
-    }
-    private async Task<string> Infer(short[] pcm,CancellationToken ct)
+    public bool Previews => true;
+    /// <summary>PCM16 mono 16 kHz as a WAV file.</summary>
+    public static byte[] ToWav(short[] pcm)
     {
         using var wav = new MemoryStream();
         using (var writer = new BinaryWriter(wav, Encoding.UTF8, true)) {
@@ -33,9 +29,20 @@ public sealed class AsrClient(HttpClient http, string endpoint, string model)
             writer.Write(32000); writer.Write((short)2); writer.Write((short)16); writer.Write("data"u8);
             writer.Write(pcm.Length*2); foreach(var x in pcm) writer.Write(x);
         }
+        return wav.ToArray();
+    }
+    private readonly SemaphoreSlim inferenceGate=new(1,1);
+    public async Task<string> Recognize(short[] pcm, CancellationToken ct)
+    {
+        await inferenceGate.WaitAsync(ct);
+        try{return await Infer(pcm,ct);}finally{inferenceGate.Release();}
+    }
+    private async Task<string> Infer(short[] pcm,CancellationToken ct)
+    {
+        var wav = ToWav(pcm);
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint.TrimEnd('/')+"/v1/chat/completions");
         request.Content = JsonContent.Create(new { model, stream=true, temperature=0, max_tokens=Math.Clamp(pcm.Length/16000*24+96,128,768), cache_prompt=false,
-            messages=new[]{new { role="user", content=new[]{new { type="input_audio", input_audio=new { data=Convert.ToBase64String(wav.ToArray()), format="wav" } } } } } });
+            messages=new[]{new { role="user", content=new[]{new { type="input_audio", input_audio=new { data=Convert.ToBase64String(wav), format="wav" } } } } } });
         using var response = await http.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,ct);
         response.EnsureSuccessStatusCode();
         using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(ct));

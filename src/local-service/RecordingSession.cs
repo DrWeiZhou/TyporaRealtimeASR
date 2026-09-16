@@ -5,7 +5,7 @@ public sealed class RecordingSession : IAsyncDisposable
     private readonly object gate=new();
     private readonly Ledger ledger;
     private readonly AudioStore audio;
-    private readonly AsrClient asr;
+    private readonly ISpeechRecognizer asr;
     private readonly IAudioCaptureFactory audioFactory;
     private readonly Segmenter segmenter=Segmenter.ForNotes();
     private readonly CancellationTokenSource cancel=new();
@@ -31,8 +31,10 @@ public sealed class RecordingSession : IAsyncDisposable
     public string Path {get;}
     public string Error {get;private set;}="";
     public object? Hypothesis {get;private set;}
+    /// <summary>Text of the most recently finalized segment; shown when no live preview exists (e.g. online ASR).</summary>
+    public string? LastFinal {get;private set;}
     public bool Recording=>recording;
-    public RecordingSession(string id,string document,string path,string root,Ledger ledger,AsrClient asr,bool recover=false,IAudioCaptureFactory? audioFactory=null) {
+    public RecordingSession(string id,string document,string path,string root,Ledger ledger,ISpeechRecognizer asr,bool recover=false,IAudioCaptureFactory? audioFactory=null) {
         Id=id;DocumentId=document;Path=path;this.ledger=ledger;this.asr=asr;
         this.audioFactory=audioFactory??new WasapiAudioCaptureFactory();
         ledger.CreateSession(id,document,path);
@@ -86,7 +88,8 @@ public sealed class RecordingSession : IAsyncDisposable
             ledger.EndSpan(Id,audio.Samples);
             foreach(var segment in segmenter.Push(pcm)) Enqueue(segment);
             ledger.SetProgress(Id,segmenter.ActiveStart ?? audio.Samples);
-            if(audio.Samples-lastPreview>=32000) {preview=segmenter.Snapshot();lastPreview=audio.Samples;}
+            // Online recognizers skip speculative previews (each would be a billed request).
+            if(audio.Samples-lastPreview>=32000) {preview=asr.Previews?segmenter.Snapshot():null;lastPreview=audio.Samples;}
         }
     }
     private void Enqueue(AudioSegment s) {ledger.AddJob(Id,$"{Id}:{s.Start}",s.Start,s.End,s.NeedsReview);preview=null;Hypothesis=null;previewCancellation?.Cancel();}
@@ -103,7 +106,7 @@ public sealed class RecordingSession : IAsyncDisposable
         }finally{lifecycle.Release();}
     }
     private double BufferedSeconds {get{lock(gate){return segmenter.ActiveStart is long start?(audio.Samples-start)/16000.0:0;}}}
-    public object Status()=>new {sessionId=Id,documentId=DocumentId,path=Path,recording,paused,processing,ended=inputClosed,rms=Rms,peak=Peak,audioSavedSamples=audio.Samples,samples=audio.Samples,seconds=audio.Samples/16000.0,bufferedSeconds=BufferedSeconds,pending=ledger.PendingCount(Id),polish=ledger.PolishStatus(Id),error=captureError.Length>0?captureError:Error.Length>0?Error:ledger.NoTextCount(Id)>0?$"有 {ledger.NoTextCount(Id)} 段未识别到文字，原始逐字稿已标记，音频已保留":"",hypothesis=Hypothesis};
+    public object Status()=>new {sessionId=Id,documentId=DocumentId,path=Path,recording,paused,processing,ended=inputClosed,rms=Rms,peak=Peak,audioSavedSamples=audio.Samples,samples=audio.Samples,seconds=audio.Samples/16000.0,bufferedSeconds=BufferedSeconds,pending=ledger.PendingCount(Id),polish=ledger.PolishStatus(Id),error=captureError.Length>0?captureError:Error.Length>0?Error:ledger.NoTextCount(Id)>0?$"有 {ledger.NoTextCount(Id)} 段未识别到文字，原始逐字稿已标记，音频已保留":"",hypothesis=Hypothesis,lastFinal=LastFinal};
     private async Task Work() {
         while(!cancel.IsCancellationRequested) {
             try {
@@ -116,7 +119,7 @@ public sealed class RecordingSession : IAsyncDisposable
                 try {
                     if(job.Id==null)lock(gate){previewCancellation=timeout;if(ledger.PendingCount(Id)>0)timeout.Cancel();}
                     var text=await asr.Recognize(job.Id!=null?audio.Read(job.Start,job.End):snap!.Samples,timeout.Token);
-                    if(job.Id!=null){ledger.AddFinal(Id,job.Id,job.Start,job.End,text,job.Review);Hypothesis=null;}
+                    if(job.Id!=null){ledger.AddFinal(Id,job.Id,job.Start,job.End,text,job.Review);Hypothesis=null;if(!string.IsNullOrWhiteSpace(text))LastFinal=text.Trim();}
                     else lock(gate) {
                         // A result for a finalized segment must never resurrect its preview.
                         var current=segmenter.Snapshot();

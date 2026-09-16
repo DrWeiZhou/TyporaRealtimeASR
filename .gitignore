@@ -17,5 +17,5 @@ config.local.json
 *.sqlite3*
 __pycache__/
 *.pyc
-/examples/记录.md
+/examples/
 *.逐字稿-*.md

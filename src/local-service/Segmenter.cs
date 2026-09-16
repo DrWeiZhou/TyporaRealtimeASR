@@ -6,7 +6,8 @@ public sealed record AudioSegment(long Start, long End, short[] Samples, bool Ne
 public sealed class Segmenter(int rate = 16000, int silenceMs = 450, int maxSeconds = 15, double threshold = 0.012,
     int minSeconds = 0, int idleMs = 450, bool reviewForced = true)
 {
-    public static Segmenter ForNotes()=>new(silenceMs:1200,maxSeconds:20,threshold:0.006,minSeconds:6,idleMs:2500,reviewForced:false);
+    // 12 s cap keeps continuous speech flowing to polishing quickly (latency budget 30–45 s).
+    public static Segmenter ForNotes()=>new(silenceMs:1200,maxSeconds:12,threshold:0.006,minSeconds:6,idleMs:2500,reviewForced:false);
     private readonly List<short> active = [];
     private readonly Queue<short> preroll = new();
     private long position, start;
