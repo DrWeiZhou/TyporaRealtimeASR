@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using TyporaAsr;
@@ -89,7 +89,7 @@ app.MapPost("/sessions/{id}/recover",async(string id,HttpContext context)=>{
 });
 app.MapGet("/sessions/{id}",(string id,HttpContext c)=>Owned(id,c).Status());
 app.MapGet("/sessions/{id}/events",(string id,long after,HttpContext c)=>{Owned(id,c);return ledger.ReadyEvents(id,Math.Max(0,after));});
-app.MapGet("/sessions/{id}/transcript",(string id,HttpContext c)=>{Owned(id,c);return new {text=ledger.Transcript(id)};});
+app.MapGet("/sessions/{id}/transcript",(string id,HttpContext c)=>{Owned(id,c);ledger.ExportTranscript(id);var stored=ledger.Session(id);string? path=stored==null?null:SessionFiles.Paths(root,id,stored.Value.Path).Transcript;return new {text=ledger.Transcript(id),path};});
 app.MapPost("/sessions/{id}/polish/retry",async(string id,HttpContext c)=>{Owned(id,c);await polishPipeline.Retry(id,c.RequestAborted);return Results.Ok();});
 app.MapPost("/sessions/{id}/pause",async(string id,HttpContext c)=>{var s=Owned(id,c);await s.Pause();return Results.Ok(s.Status());});
 app.MapPost("/sessions/{id}/resume",async(string id,ResumeRequest request,HttpContext c)=>{await sessionGate.WaitAsync();try{if(shuttingDown)throw new InvalidOperationException("服务正在终止");var s=Owned(id,c);if(sessions.Values.Any(other=>other.Id!=id && other.Recording))throw new ArgumentException("另一个会话正在录音");await s.Resume(request.Device);return Results.Ok(s.Status());}finally{sessionGate.Release();}});
