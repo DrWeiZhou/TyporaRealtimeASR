@@ -127,6 +127,7 @@ if(args.Contains("--capture")){
 if(args.Contains("--pause-capture")){
  var root=Path.Combine(Path.GetTempPath(),"asr-pause-capture-"+Guid.NewGuid());Directory.CreateDirectory(root);
  try{using var db=new Ledger(root);using var http=new HttpClient();var asr=new AsrClient(http,"http://127.0.0.1:1","test");
+ new StorageSettings(root).Save(Path.Combine(root,"records"));
  var captureId=Guid.NewGuid().ToString();var captureDoc=Path.Combine(root,"note.md");File.WriteAllText(captureDoc,"# Capture test");
  await using var s=new RecordingSession(captureId,"d",captureDoc,root,db,asr);
  s.Start(-1);await Task.Delay(1200);await s.Pause();var first=System.Text.Json.JsonSerializer.SerializeToElement(s.Status());var count=first.GetProperty("samples").GetInt64();
@@ -144,7 +145,7 @@ if(args.Contains("--pause-capture")){
 }
 if(args.Length==5 && args[0]=="--editor-integration") {
  using var ledger=new Ledger(args[2]);using var http=new HttpClient();var client=new AsrClient(http,"http://127.0.0.1:18081","qwen3-asr");
- var id=Guid.NewGuid().ToString();
+ var id=Guid.NewGuid().ToString();new StorageSettings(args[2]).Save(Path.Combine(args[2],"records"));
  await using var s=new RecordingSession(id,args[4],args[3],args[2],ledger,client);
  var bytes=File.ReadAllBytes(args[1]);var pcm=new short[bytes.Length/2];Buffer.BlockCopy(bytes,0,pcm,0,bytes.Length);
  for(var offset=0;offset<pcm.Length;offset+=3200)s.Accept(pcm.Skip(offset).Take(3200).ToArray());await s.Stop();
@@ -154,16 +155,20 @@ if(args.Length==5 && args[0]=="--editor-integration") {
  Console.WriteLine("PASS persisted real-model fixture for editor integration");
 }
 if(args.Length==3 && args[0]=="--seed-polish-fixture"){
- Directory.CreateDirectory(args[1]);using var db=new Ledger(args[1]);var session=Guid.NewGuid().ToString();var doc=Guid.NewGuid().ToString();
+ Directory.CreateDirectory(args[1]);new StorageSettings(args[1]).Save(Path.Combine(args[1],"records"));using var db=new Ledger(args[1]);var session=Guid.NewGuid().ToString();var doc=Guid.NewGuid().ToString();
  File.WriteAllText(args[2],$"# 润色集成测试\n\n人工笔记起始内容\n\n<!-- asr-insert:{doc} -->\n");db.CreateSession(session,doc,Path.GetFullPath(args[2]));db.EnablePolish(session);
  db.BeginSpan(session,0,DateTimeOffset.Parse("2026-09-12T10:00:00+08:00"));db.EndSpan(session,32000);
- db.AddFinal(session,session+":0",0,16000,"原始口语一",false);db.AddFinal(session,session+":16000",16000,32000,"原始口语二",false);
- db.CutWindows(_=>true,DateTimeOffset.UtcNow);var fixtureJob=db.NextPolish()??throw new Exception("Fixture window missing");
- db.SnapshotPolish(fixtureJob.Id,"fixture-only");db.CompletePolish(fixtureJob.Id,[new PolishBlock("new","润色集成话题一",["已润色的第一句话。"]),new PolishBlock("new","润色集成话题二",["已润色的第二句话。"])]);
+ db.AddFinal(session,session+":0",0,16000,"原始口语一",false);db.CutWindows(_=>true,DateTimeOffset.UtcNow);
+ db.AddFinal(session,session+":16000",16000,32000,"原始口语二",false);db.CutWindows(_=>true,DateTimeOffset.UtcNow);
+ foreach(var (paragraphs,continues) in new[]{(new[]{"已润色的第一句话。","已润色的第二句话。"},false),(new[]{"已润色的接续内容。"},true)}){
+  var fixtureJob=db.NextPolish()??throw new Exception("Fixture window missing");
+  db.SnapshotPolish(fixtureJob.Id,"fixture-only");db.CompletePolish(fixtureJob.Id,paragraphs,continues);
+ }
  db.AddFinal(session,session+":32000",32000,48000,"不能入文的未润色原始内容",false);
  File.WriteAllText(Path.Combine(args[1],"integration-session.json"),System.Text.Json.JsonSerializer.Serialize(new {sessionId=session,documentId=doc}));Console.WriteLine("PASS prepared isolated editor fixture");
 }
 try {await PipelineTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL pipeline: "+e);}
 try {await OnlineAsrTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL online ASR: "+e);}
+try {await ConfigTransferTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL config transfer: "+e);}
 try {await WavTests.Run();}catch(Exception e){failures++;Console.WriteLine("FAIL WAV: "+e.Message);}
 Environment.ExitCode = failures == 0 ? 0 : 1;

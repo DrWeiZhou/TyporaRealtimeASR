@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace TyporaAsr;
 
-public sealed record TranscriptEvent(long Seq,string EventId,string SessionId,long Start,long End,string Text,bool NeedsReview,string State,string PolishState="ready",PolishBlock[]? Blocks=null);
+public sealed record TranscriptEvent(long Seq,string EventId,string SessionId,long Start,long End,string Text,bool NeedsReview,string State,string PolishState="ready",string[]? Paragraphs=null,bool Continues=false);
 public sealed partial class Ledger : IDisposable
 {
     private readonly SqliteConnection db;

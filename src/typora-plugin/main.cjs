@@ -2,6 +2,7 @@
 const {EditorAdapter}=require('./editor-adapter.cjs');
 const {TranscriptController}=require('./controller.cjs');
 const {ServiceClient}=require('./client.cjs');
+const {makeDraggable}=require('./panel-drag.cjs');
 
 module.exports=function mount(w,config){
  if(w.typoraRealtimeAsr)return w.typoraRealtimeAsr;
@@ -14,10 +15,12 @@ module.exports=function mount(w,config){
  #asr-toggle{position:fixed;right:22px;bottom:24px;z-index:9999;border:0;border-radius:24px;padding:12px 18px;background:#235c4b;color:white;box-shadow:0 3px 16px #0003;cursor:pointer}
  #asr-panel{position:fixed;right:20px;top:70px;width:340px;max-height:78vh;overflow:auto;z-index:9998;background:var(--bg-color,#fff);color:var(--text-color,#222);border:1px solid #8885;border-radius:14px;padding:20px;box-shadow:0 8px 35px #0002;font-family:system-ui,sans-serif;font-size:14px}
  #asr-panel h3{font-size:20px;margin:0 0 12px;padding-right:80px}#asr-panel #asr-minimize,#asr-panel #asr-close{position:absolute;top:12px;margin:0;font-size:18px;line-height:1;padding:7px;width:32px;height:32px}#asr-panel #asr-minimize{right:52px}#asr-panel #asr-close{right:14px}#asr-panel.asr-minimized{width:220px;max-height:none;overflow:hidden;padding:10px 12px;border-radius:6px}#asr-panel.asr-minimized>:not(h3):not(#asr-minimize):not(#asr-close){display:none}#asr-panel.asr-minimized h3{font-size:14px;line-height:32px;margin:0;white-space:nowrap}#asr-panel.asr-minimized #asr-minimize,#asr-panel.asr-minimized #asr-close{top:10px}#asr-preview{margin-top:10px}#asr-panel p{margin:10px 0;line-height:1.65}#asr-panel button,#asr-panel select{padding:7px 10px;margin:4px 4px 4px 0;border:1px solid #8886;border-radius:6px;background:transparent;color:inherit;cursor:pointer}#asr-panel button:disabled{opacity:.4;cursor:default}
+ #asr-panel::before{content:'';position:absolute;top:5px;left:50%;width:40px;height:4px;margin-left:-20px;border-radius:2px;background:#8885}#asr-panel.asr-dragging{opacity:.92;box-shadow:0 12px 40px #0004}
  #asr-preview{padding:12px;border-left:3px solid #458a71;min-height:65px;background:#458a7110;white-space:pre-wrap}#asr-status{color:#697870;font-size:12px}#asr-review>div{border-top:1px solid #8884;margin-top:12px;padding-top:8px}#asr-panel small{color:#777}#asr-devices{max-width:100%}
  `;d.head.appendChild(style);
  const panel=d.createElement('section');panel.id='asr-panel';panel.innerHTML=`<h3>语音记录</h3><button id="asr-minimize" title="缩小面板" aria-label="缩小面板" aria-expanded="true">−</button><button id="asr-close" title="关闭窗口" aria-label="关闭窗口">×</button><small id="asr-mode">正在检测识别方式 · 在线润色后自动补充</small><div id="asr-preview" role="status">当前句将在这里实时显示。</div><p id="asr-target">尚未绑定文档</p><select id="asr-devices" aria-label="录音设备"><option value="-1">默认麦克风</option></select><div><button id="asr-start">开始录音</button><button id="asr-pause" disabled>暂停</button><button id="asr-stop" disabled>结束录音</button><button id="asr-recover">恢复记录</button></div><p id="asr-status">准备就绪。Ctrl+Alt+R 展开或缩小面板。</p><div id="asr-review"></div>`;
  const toggle=d.createElement('button');toggle.id='asr-toggle';toggle.textContent='语音记录';d.body.append(panel,toggle);
+ const drag=makeDraggable(w,panel);
  const $=id=>panel.querySelector('#'+id);
  const status=text=>{$('asr-status').textContent=text;lastStatus=text};
  const showError=e=>status(e.message||String(e));
@@ -26,7 +29,7 @@ module.exports=function mount(w,config){
   view=next;panel.hidden=next==='closed';panel.classList.toggle('asr-minimized',next==='compact');toggle.hidden=next!=='expanded';
   const minimized=next==='compact',button=$('asr-minimize');
   button.textContent=minimized?'□':'−';button.title=minimized?'展开面板':'缩小面板';button.setAttribute('aria-label',button.title);button.setAttribute('aria-expanded',String(next==='expanded'));
-  if(next!=='closed')button.focus();
+  if(next!=='closed'){drag.refit();button.focus();}
  }
  toggle.onclick=()=>setView(view==='expanded'?'compact':'expanded');
  $('asr-minimize').onclick=()=>setView(view==='compact'?'expanded':'compact');
@@ -77,7 +80,7 @@ async function start(){
    const card=d.createElement('div');card.dataset.event=event.eventId;const text=d.createElement('p');text.textContent=event.text;
    const failed=event.polishState==='failed';
    const note=d.createElement('small');note.textContent=failed?'在线润色多次失败：可插入未润色原文、忽略，或点击“重试润色”':event.needsReview?'长句边界需要确认':'此段可能已插入或被人工删除，请核对后选择';
-   const target=failed?{...event,polishState:'ready',blocks:[{topic:'continue',title:'',paragraphs:[event.text]}]}:event;
+   const target=failed?{...event,polishState:'ready',paragraphs:[event.text]}:event;
    const insert=d.createElement('button');insert.textContent=failed?'插入原文':'插入此段';insert.onclick=async()=>{if(serviceStopping||busy||controlBusy)return;busy=true;try{const result=await controller.apply(target,true);if(result!=='deferred'){pending.delete(event.eventId);toSave.set(event.eventId,event);card.remove()}}catch(e){showError(e)}finally{busy=false}};
    const ignore=d.createElement('button');ignore.textContent='忽略';ignore.onclick=async()=>{if(serviceStopping||busy||controlBusy)return;busy=true;try{await ack(event.eventId,'deleted');pending.delete(event.eventId);card.remove()}catch(e){showError(e)}finally{busy=false}};
    card.append(note,text,insert,ignore);area.append(card);
@@ -132,6 +135,6 @@ async function start(){
  const extra=require('./panel-controls.cjs')(w,config,client,panel,{terminateService,session:()=>session,pending:()=>pending.size,toSave:()=>toSave.size,status,refreshDevices,replayFailed:id=>{if(id===session?.sessionId){replayRevision++;after=0;}}});
  $('asr-pause').onclick=pause;$('asr-start').onclick=start;$('asr-stop').onclick=stop;$('asr-recover').onclick=()=>recover();
  refreshDevices();const timer=w.setInterval(tick,200);
- const api={start,stop,pause,recover,getState:()=>({session,busy,controlBusy,pending:pending.size,toSave:toSave.size,status:lastStatus}),dispose:()=>{d.removeEventListener('keydown',onKeyDown);w.clearInterval(timer);extra.dispose();adapter?.dispose();panel.remove();toggle.remove();style.remove()}};
+ const api={start,stop,pause,recover,getState:()=>({session,busy,controlBusy,pending:pending.size,toSave:toSave.size,status:lastStatus}),dispose:()=>{d.removeEventListener('keydown',onKeyDown);drag.dispose();w.clearInterval(timer);extra.dispose();adapter?.dispose();panel.remove();toggle.remove();style.remove()}};
  w.typoraRealtimeAsr=api;return api;
 };

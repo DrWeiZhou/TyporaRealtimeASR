@@ -17,6 +17,7 @@ using var http=new HttpClient {Timeout=TimeSpan.FromSeconds(100)};
 var endpoint=builder.Configuration["AsrEndpoint"] ?? "http://127.0.0.1:18081";
 var asr=new AsrClient(http,endpoint,builder.Configuration["AsrModel"] ?? "qwen3-asr");
 var polishSettings=new PolishSettings(root);
+var storageSettings=new StorageSettings(root);
 var audioFactory=new WasapiAudioCaptureFactory();
 using var onlineHttp=new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(65)};
 var onlineAsr=new OnlineAsrSettings(root);
@@ -60,6 +61,17 @@ app.MapGet("/model-health",async()=>{if(onlineAsr.Online)return Results.Ok(new {
 app.MapGet("/polish/config",()=>polishSettings.Public());
 app.MapPost("/polish/config",(PolishConfig config)=>{polishSettings.Save(config);return Results.Ok(polishSettings.Public());});
 app.MapPost("/polish/test",async(HttpContext context)=>{var config=polishSettings.Current()??throw new ArgumentException("请先保存润色配置");try{await PolishPipeline.Request(onlineHttp,config,"这是一条连接测试文本。",context.RequestAborted);return Results.Ok(new {ok=true});}catch{throw new ArgumentException("在线连接测试失败，请检查地址、模型、密钥与网络");}});
+app.MapGet("/storage/config",()=>storageSettings.Public());
+app.MapPost("/storage/config",(StorageRequest request)=>{storageSettings.Save(request.RecordDirectory);return Results.Ok(storageSettings.Public());});
+// Settings transfer. The export contains API keys in plain text (the user chose to include them).
+app.MapGet("/config/export",()=>ConfigTransfer.Export(polishSettings,onlineAsr,storageSettings));
+app.MapPost("/config/import",async(ConfigExport config,HttpContext context)=>{
+    var messages=await ConfigTransfer.Import(config,polishSettings,onlineAsr,storageSettings,async candidate=>{
+        using var deadline=CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        await OnlineAsrClient.Recognize(onlineHttp,candidate,new short[16000],deadline.Token);
+    });
+    return Results.Ok(new {messages});
+});
 app.MapGet("/asr/config",()=>onlineAsr.Public());
 app.MapPost("/asr/config",async(OnlineAsrRequest request,HttpContext context)=>{
     if(!request.Enabled){
@@ -133,4 +145,5 @@ try {await app.RunAsync();}finally{pipelineCancel.Cancel();await pipelineWorker;
 record StartRequest(string SessionId,string DocumentId,string Path,int Device=-1);
 record AckRequest(string EventId,string State);
 record ResumeRequest(int Device=-1);
+record StorageRequest(string? RecordDirectory);
 record OnlineAsrRequest(bool Enabled,string? Protocol,string? BaseUrl,string? Model,string? ApiKey);

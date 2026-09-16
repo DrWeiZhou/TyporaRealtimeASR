@@ -3,12 +3,13 @@ using System.Text.Json;
 
 namespace TyporaAsr;
 /// <summary>A polish request for one window of consecutive recognized utterances.</summary>
-public sealed record PolishJob(string Id,string Session,string Text,string? Config,int Attempts,string Context="",string[]? Topics=null);
+public sealed record PolishJob(string Id,string Session,string Text,string? Config,int Attempts,string Context="");
 public sealed partial class Ledger {
- // Window cut policy (target: text in the document within 30–45 s of speech): cut when 300–1000 characters are ready,
- // or the oldest utterance has waited 10 s, or input is paused/stopped. While a window is still open, new utterances
- // keep accumulating so a slow model gets one larger window instead of a growing queue.
- public const int WindowMinChars=300,WindowMaxChars=1000,WindowMaxWaitSeconds=10,PolishMaxAttempts=3;
+ // Window cut policy (target: a new write at most ~15 s after the previous one): each recognized utterance is sent almost
+ // immediately. Cut when 60 characters are ready, the oldest utterance has waited 3 s, or input is paused/stopped.
+ // Up to MaxOpenWindows windows per session are polished concurrently; only when that many are still open do new
+ // utterances accumulate (up to WindowMaxChars) so a slow model gets larger windows instead of a growing queue.
+ public const int WindowMinChars=60,WindowMaxChars=400,WindowMaxWaitSeconds=3,MaxOpenWindows=3,PolishMaxAttempts=3;
  private const string Eligible="e.win IS NULL AND e.state IN ('recognized','reviewed') AND NOT EXISTS(SELECT 1 FROM polish lp WHERE lp.id=e.id AND lp.result IS NOT NULL)";
  private const string OpenWindow="w.result IS NULL AND w.state IN ('recognized','reviewed')";
  private string storageRoot="";
@@ -17,7 +18,7 @@ public sealed partial class Ledger {
  private void InitializePipeline(string root){
   storageRoot=root;
   Execute("CREATE TABLE IF NOT EXISTS polish_sessions(session TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS polish(id TEXT PRIMARY KEY,config TEXT,result TEXT,attempts INTEGER NOT NULL DEFAULT 0,next INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS spans(session TEXT,start INTEGER,end INTEGER,wall TEXT,PRIMARY KEY(session,start));");
-  Execute("CREATE TABLE IF NOT EXISTS polish_windows(id TEXT PRIMARY KEY,session TEXT NOT NULL,first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,review INTEGER NOT NULL DEFAULT 0,config TEXT,result TEXT,attempts INTEGER NOT NULL DEFAULT 0,next INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',state TEXT NOT NULL DEFAULT 'recognized'); CREATE INDEX IF NOT EXISTS polish_windows_session ON polish_windows(session,first_seq); CREATE TABLE IF NOT EXISTS polish_topics(session TEXT NOT NULL,seq INTEGER NOT NULL,pos INTEGER NOT NULL,title TEXT NOT NULL,PRIMARY KEY(session,seq,pos));");
+  Execute("CREATE TABLE IF NOT EXISTS polish_windows(id TEXT PRIMARY KEY,session TEXT NOT NULL,first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,review INTEGER NOT NULL DEFAULT 0,config TEXT,result TEXT,attempts INTEGER NOT NULL DEFAULT 0,next INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',state TEXT NOT NULL DEFAULT 'recognized'); CREATE INDEX IF NOT EXISTS polish_windows_session ON polish_windows(session,first_seq); DROP TABLE IF EXISTS polish_topics;");
   // events.win: owning window (non-null = consumed by window polishing); events.at: unix seconds when recognized.
   var columns=Columns("events");
   if(!columns.Contains("win"))Execute("ALTER TABLE events ADD COLUMN win TEXT");
@@ -35,14 +36,15 @@ public sealed partial class Ledger {
  private sealed record Utterance(long Seq,string Id,long Start,long End,string Text,bool Review,long? At);
  /// <summary>Groups recognized utterances into polish windows. flush(session) is true when no more audio is expected soon.</summary>
  public int CutWindows(Func<string,bool> flush,DateTimeOffset now){lock(gate){
-  var sessions=new List<string>();
-  using(var c=db.CreateCommand()){c.CommandText=$"SELECT DISTINCT e.session FROM events e JOIN polish_sessions s ON s.session=e.session WHERE {Eligible} AND NOT EXISTS(SELECT 1 FROM polish_windows w WHERE w.session=e.session AND {OpenWindow} AND w.attempts<{PolishMaxAttempts})";using var r=c.ExecuteReader();while(r.Read())sessions.Add(r.GetString(0));}
+  var sessions=new List<(string Session,int Open)>();
+  using(var c=db.CreateCommand()){c.CommandText=$"SELECT DISTINCT e.session,(SELECT COUNT(*) FROM polish_windows w WHERE w.session=e.session AND {OpenWindow} AND w.attempts<{PolishMaxAttempts}) FROM events e JOIN polish_sessions s ON s.session=e.session WHERE {Eligible}";using var r=c.ExecuteReader();while(r.Read())sessions.Add((r.GetString(0),r.GetInt32(1)));}
   var created=0;
-  foreach(var session in sessions){
+  foreach(var (session,open) in sessions){
+   if(open>=MaxOpenWindows)continue;
    var rows=new List<Utterance>();
    using(var c=db.CreateCommand()){c.CommandText=$"SELECT e.seq,e.id,e.start,e.end,e.text,e.review,e.at FROM events e WHERE e.session=$0 AND {Eligible} ORDER BY e.seq";c.Parameters.AddWithValue("$0",session);using var r=c.ExecuteReader();while(r.Read())rows.Add(new(r.GetInt64(0),r.GetString(1),r.GetInt64(2),r.GetInt64(3),r.GetString(4),r.GetInt64(5)!=0,r.IsDBNull(6)?(long?)null:r.GetInt64(6)));}
    var shouldFlush=flush(session);
-   for(var from=0;from<rows.Count;){
+   for(int from=0,count=open;from<rows.Count&&count<MaxOpenWindows;count++){
     var last=PickCut(rows,from,now,shouldFlush);if(last<0)break;
     CreateWindow(session,rows.GetRange(from,last-from+1));created++;from=last+1;
    }
@@ -56,7 +58,7 @@ public sealed partial class Ledger {
    if(i>from&&total+length>WindowMaxChars){full=true;break;}
    total+=length;last=i;
    if(total>=WindowMinChars){
-    // Prefer the longest pause between utterances inside the 600–1000 character band.
+    // Prefer the longest pause between utterances inside the WindowMinChars–WindowMaxChars band.
     var gap=i+1<rows.Count?rows[i+1].Start-rows[i].End:0;
     if(best<0||gap>bestGap){best=i;bestGap=gap;}
    }
@@ -84,51 +86,62 @@ public sealed partial class Ledger {
   return new(id,session,first,last,review,config,result,attempts,state,text.ToString(),start==long.MaxValue?0:start,end);
  }
 
- public PolishJob? NextPolish(){lock(gate){
+ /// <summary>Next window to request. busy lists windows already being requested; windows of one session may run concurrently,
+ /// the editor still receives them in order.</summary>
+ public PolishJob? NextPolish(IReadOnlyCollection<string>? busy=null){lock(gate){
   // Prioritize the session being used, then newer sessions; windows stay in order inside each session.
   var preferred=recentActivity.Where(x=>x.Value>DateTime.UtcNow.AddSeconds(-12)).OrderByDescending(x=>x.Value).Select(x=>x.Key).FirstOrDefault()??"";
   string? id;
   using(var c=db.CreateCommand()){
-   c.CommandText=$"SELECT w.id FROM polish_windows w JOIN polish_sessions s ON s.session=w.session JOIN sessions metadata ON metadata.id=w.session WHERE {OpenWindow} AND w.attempts<{PolishMaxAttempts} AND w.next<=$0 AND NOT EXISTS(SELECT 1 FROM polish_windows b WHERE b.session=w.session AND b.first_seq<w.first_seq AND b.result IS NULL AND b.state IN ('recognized','reviewed') AND b.attempts<{PolishMaxAttempts}) ORDER BY CASE WHEN w.session=$1 THEN 0 ELSE 1 END,metadata.rowid DESC,w.first_seq LIMIT 1";
+   var excluded=busy==null||busy.Count==0?"":" AND w.id NOT IN ("+string.Join(",",busy.Select((_,i)=>"$b"+i))+")";
+   c.CommandText=$"SELECT w.id FROM polish_windows w JOIN polish_sessions s ON s.session=w.session JOIN sessions metadata ON metadata.id=w.session WHERE {OpenWindow} AND w.attempts<{PolishMaxAttempts} AND w.next<=$0{excluded} ORDER BY CASE WHEN w.session=$1 THEN 0 ELSE 1 END,metadata.rowid DESC,w.first_seq LIMIT 1";
    c.Parameters.AddWithValue("$1",preferred);c.Parameters.AddWithValue("$0",DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+   if(busy!=null)foreach(var (value,i) in busy.Select((x,i)=>(x,i)))c.Parameters.AddWithValue("$b"+i,value);
    id=c.ExecuteScalar() as string;
   }
   var w=id==null?null:Window(id);if(w==null)return null;
-  return new(w.Id,w.Session,w.Text,w.Config,w.Attempts,Context(w.Session,w.FirstSeq),Topics(w.Session,w.FirstSeq));
+  return new(w.Id,w.Session,w.Text,w.Config,w.Attempts,Context(w.Session,w.FirstSeq));
  }}
+ /// <summary>The paragraph the document ends with before this window: the last paragraph of the previous window, extended
+ /// backwards through windows that continued it. A previous window still being polished contributes its raw text.</summary>
  private string Context(string session,long before){
-  using(var c=db.CreateCommand()){c.CommandText="SELECT result FROM polish_windows WHERE session=$0 AND last_seq<$1 AND result IS NOT NULL ORDER BY last_seq DESC LIMIT 1";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",before);
-   if(c.ExecuteScalar() is string json){var paragraphs=PolishFormat.Deserialize(json).SelectMany(b=>b.Paragraphs).ToList();if(paragraphs.Count>0)return PolishFormat.Tail(paragraphs);}}
-  // Sessions polished before windowing existed: use their last per-utterance results.
-  var legacy=new List<string>();
-  using(var c=db.CreateCommand()){c.CommandText="SELECT p.result FROM events e JOIN polish p ON p.id=e.id WHERE e.session=$0 AND e.seq<$1 AND p.result IS NOT NULL ORDER BY e.seq DESC LIMIT 2";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",before);using var r=c.ExecuteReader();while(r.Read())legacy.Insert(0,r.GetString(0));}
-  return PolishFormat.Tail(legacy);
- }
- private string[] Topics(string session,long before){
-  var list=new List<string>();
-  using var c=db.CreateCommand();c.CommandText="SELECT title FROM polish_topics WHERE session=$0 AND seq<$1 ORDER BY seq,pos";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",before);
-  using var r=c.ExecuteReader();while(r.Read())list.Add(r.GetString(0));
-  return list.Skip(Math.Max(0,list.Count-PolishFormat.MaxTopics)).ToArray();
+  var parts=new List<string>();
+  using(var c=db.CreateCommand()){c.CommandText="SELECT id,result FROM polish_windows WHERE session=$0 AND last_seq<$1 AND state<>'deleted' ORDER BY last_seq DESC LIMIT 20";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",before);
+   var rows=new List<(string Id,string? Result)>();
+   using(var r=c.ExecuteReader())while(r.Read())rows.Add((r.GetString(0),r.IsDBNull(1)?null:r.GetString(1)));
+   foreach(var (id,json) in rows){
+    if(json==null){if(Window(id) is {Text.Length:>0} raw)parts.Insert(0,raw.Text);break;}
+    var result=PolishFormat.Deserialize(json);if(result.Paragraphs.Length==0)continue;
+    parts.Insert(0,result.Paragraphs[^1]);
+    if(!(result.Continues&&result.Paragraphs.Length==1))break;
+    if(parts.Sum(x=>x.Length)>PolishFormat.MaxContextChars*4)break;
+   }
+  }
+  if(parts.Count>0)return PolishFormat.Excerpt(string.Concat(parts));
+  // Sessions polished before windowing existed: use their last per-utterance result.
+  using(var c=db.CreateCommand()){c.CommandText="SELECT p.result FROM events e JOIN polish p ON p.id=e.id WHERE e.session=$0 AND e.seq<$1 AND p.result IS NOT NULL ORDER BY e.seq DESC LIMIT 1";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",before);
+   return c.ExecuteScalar() is string legacy?PolishFormat.Excerpt(legacy.Trim()):"";}
  }
  public void SnapshotPolish(string id,string config)=>Execute("UPDATE polish_windows SET config=COALESCE(config,$1),started=$2 WHERE id=$0",id,config,DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
- public void CompletePolish(string id,IReadOnlyList<PolishBlock> blocks){lock(gate){
+ public void CompletePolish(string id,IReadOnlyList<string> paragraphs,bool continues=false)=>CompletePolish(id,new PolishResult(paragraphs.ToArray(),continues));
+ public void CompletePolish(string id,PolishResult result){lock(gate){
   using var transaction=db.BeginTransaction();
-  string? session=null;long first=0;
-  using(var c=db.CreateCommand()){c.Transaction=transaction;c.CommandText="UPDATE polish_windows SET result=$1,error='',finished=$2 WHERE id=$0 AND result IS NULL RETURNING session,first_seq";c.Parameters.AddWithValue("$0",id);c.Parameters.AddWithValue("$2",DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());c.Parameters.AddWithValue("$1",PolishFormat.Serialize(blocks));using var r=c.ExecuteReader();if(r.Read()){session=r.GetString(0);first=r.GetInt64(1);}}
-  if(session!=null){
-   using(var c=db.CreateCommand()){c.Transaction=transaction;c.CommandText="DELETE FROM polish_topics WHERE session=$0 AND seq=$1";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",first);c.ExecuteNonQuery();}
-   var position=0;
-   foreach(var block in blocks){
-    if(block.Topic!="new")continue;
-    using var c=db.CreateCommand();c.Transaction=transaction;c.CommandText="INSERT INTO polish_topics VALUES($0,$1,$2,$3)";c.Parameters.AddWithValue("$0",session);c.Parameters.AddWithValue("$1",first);c.Parameters.AddWithValue("$2",position++);c.Parameters.AddWithValue("$3",block.Title);c.ExecuteNonQuery();
-   }
-   // Nothing worth recording: the window is consumed silently.
-   if(blocks.Count==0)using(var c=db.CreateCommand()){c.Transaction=transaction;c.CommandText="UPDATE polish_windows SET state='deleted' WHERE id=$0 AND state IN ('recognized','reviewed')";c.Parameters.AddWithValue("$0",id);c.ExecuteNonQuery();}
-  }
+  int updated;
+  using(var c=db.CreateCommand()){c.Transaction=transaction;c.CommandText="UPDATE polish_windows SET result=$1,error='',finished=$2 WHERE id=$0 AND result IS NULL";c.Parameters.AddWithValue("$0",id);c.Parameters.AddWithValue("$2",DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());c.Parameters.AddWithValue("$1",PolishFormat.Serialize(result));updated=c.ExecuteNonQuery();}
+  // Nothing worth recording: the window is consumed silently.
+  if(updated>0&&result.Paragraphs.Length==0)using(var c=db.CreateCommand()){c.Transaction=transaction;c.CommandText="UPDATE polish_windows SET state='deleted' WHERE id=$0 AND state IN ('recognized','reviewed')";c.Parameters.AddWithValue("$0",id);c.ExecuteNonQuery();}
   transaction.Commit();
  }}
  public void FailPolish(string id,int attempts,string error)=>Execute("UPDATE polish_windows SET attempts=$1,next=$2,error=$3 WHERE id=$0",id,attempts,DateTimeOffset.UtcNow.AddSeconds(Math.Min(30,attempts*3)).ToUnixTimeSeconds(),error);
- public void RetryPolish(string session)=>Execute("UPDATE polish_windows SET attempts=0,next=0,config=NULL,error='' WHERE session=$0 AND result IS NULL AND state IN ('recognized','reviewed')",session);
+ /// <summary>Manual retry. Windows listed in busy are being requested right now and keep their snapshot.</summary>
+ public void RetryPolish(string session,IReadOnlyCollection<string>? busy=null){lock(gate){
+  using var c=db.CreateCommand();
+  var excluded=busy==null||busy.Count==0?"":" AND id NOT IN ("+string.Join(",",busy.Select((_,i)=>"$b"+i))+")";
+  c.CommandText=$"UPDATE polish_windows SET attempts=0,next=0,config=NULL,error='' WHERE session=$0 AND result IS NULL AND state IN ('recognized','reviewed'){excluded}";
+  c.Parameters.AddWithValue("$0",session);
+  if(busy!=null)foreach(var (value,i) in busy.Select((x,i)=>(x,i)))c.Parameters.AddWithValue("$b"+i,value);
+  c.ExecuteNonQuery();
+ }}
  public object PolishStatus(string session){lock(gate){
   long Count(string sql){using var c=db.CreateCommand();c.CommandText=sql;c.Parameters.AddWithValue("$0",session);return Convert.ToInt64(c.ExecuteScalar());}
   var waiting=Count($"SELECT COUNT(*) FROM events e WHERE e.session=$0 AND {Eligible}");
@@ -167,11 +180,11 @@ public sealed partial class Ledger {
    if(e.Seq!=w.LastSeq)continue;
    var windowEvent=new TranscriptEvent(e.Seq,w.Id,session,w.Start,w.End,w.Text,w.Review,w.State);
    if(w.Result!=null){
-    var blocks=PolishFormat.Deserialize(w.Result);
-    result.Add(windowEvent with{Text=PolishFormat.PlainText(blocks),Blocks=blocks,State=blocks.Length==0&&open?"deleted":w.State});
+    var polished=PolishFormat.Deserialize(w.Result);
+    result.Add(windowEvent with{Text=PolishFormat.PlainText(polished.Paragraphs),Paragraphs=polished.Paragraphs,Continues=polished.Continues,State=polished.Paragraphs.Length==0&&open?"deleted":w.State});
    }
    else if(open)result.Add(windowEvent with{PolishState="failed"});
-   else result.Add(windowEvent with{Blocks=[new("continue","",[w.Text])]});
+   else result.Add(windowEvent with{Paragraphs=[w.Text]});
   }
   return result;
  }}

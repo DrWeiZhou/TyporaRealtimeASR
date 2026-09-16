@@ -1,4 +1,6 @@
 namespace TyporaAsr;
+/// <summary>Maps a session to its WAV recording and raw transcript. New sessions are placed in the record-data directory
+/// (StorageSettings); the chosen path is persisted per session, so changing the directory never moves existing recordings.</summary>
 public static class SessionFiles {
  private static readonly object Gate=new();
  private static string TranscriptPath(string audio){
@@ -26,13 +28,14 @@ public static class SessionFiles {
      using var command=db.CreateCommand();command.CommandText="SELECT wall FROM spans WHERE session=$id ORDER BY start LIMIT 1";command.Parameters.AddWithValue("$id",session);
      if(command.ExecuteScalar() is string wall)start=DateTimeOffset.Parse(wall);
     }
-    var stem=Path.Combine(directory,$"{name}.录音-{start:yyyy-MM-dd_HH-mm-ss-fff}");audio=stem+".wav";
+    var records=new StorageSettings(root).RecordDirectory;Directory.CreateDirectory(records);
+    var stem=Path.Combine(records,$"{name}.录音-{start:yyyy-MM-dd_HH-mm-ss-fff}");audio=stem+".wav";
     var reserved=Directory.EnumerateFiles(mappings,"*.json").Select(f=>System.Text.Json.JsonSerializer.Deserialize<string>(File.ReadAllText(f))).ToHashSet(StringComparer.OrdinalIgnoreCase);
     for(var suffix=2;File.Exists(audio)||File.Exists(TranscriptPath(audio))||reserved.Contains(audio);suffix++)audio=stem+$"-{suffix}.wav";
     var temp=mapping+".tmp";File.WriteAllText(temp,System.Text.Json.JsonSerializer.Serialize(audio));File.Move(temp,mapping,false);
    }
    var transcript=TranscriptPath(audio);var legacyTranscript=Path.Combine(directory,$"{name}.逐字稿-{session}.md");
-   if(!File.Exists(transcript)&&File.Exists(legacyTranscript))File.Move(legacyTranscript,transcript,false);
+   if(!File.Exists(transcript)&&File.Exists(legacyTranscript)){Directory.CreateDirectory(Path.GetDirectoryName(transcript)!);File.Move(legacyTranscript,transcript,false);}
    return(audio,transcript);
   }
  }
@@ -41,7 +44,7 @@ public static class SessionFiles {
   if(Guid.TryParse(session,out _)&&!File.Exists(target)){
    var name=Path.GetFileNameWithoutExtension(document);if(name.Length>80)name=name[..80];
    var oldWav=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(document))!,$"{name}.录音-{session}.wav");
-   if(File.Exists(oldWav)){File.Move(oldWav,target,false);return target;}
+   if(File.Exists(oldWav)){Directory.CreateDirectory(Path.GetDirectoryName(target)!);File.Move(oldWav,target,false);return target;}
   }
   var legacy=Path.Combine(root,"audio",session+".pcm");
   if(target==legacy||File.Exists(target)||!File.Exists(legacy))return target;

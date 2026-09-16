@@ -3,7 +3,6 @@ const normalize=s=>s.replace(/^\uFEFF/,'').replace(/\r\n/g,'\n');
 const escapeText=s=>s.replace(/[\\`*_{}\[\]<>#]/g,'\\$&').replace(/[\r\n]+/g,' ');
 // Paragraphs must not be re-parsed as list items when they start with a number or bullet.
 const escapeParagraph=s=>escapeText(String(s).trim()).replace(/^(\d+)([.)])/,'$1\\$2').replace(/^([-+])(\s)/,'\\$1$2');
-const JOIN_BELOW=150,JOIN_MAX=350;
 const orderedItem=(start,text)=>({type:'list',style:'ol',start,isFixed:false,children:[{type:'list_item',children:[{type:'paragraph',text}]}]});
 class EditorAdapter {
   constructor(w,documentId,stateRoot) {
@@ -38,18 +37,18 @@ class EditorAdapter {
     this.state.number=max;
   }
   persist(){const fs=this.w.reqnode('fs'),path=this.w.reqnode('path');fs.mkdirSync(path.dirname(this.stateFile),{recursive:true});fs.writeFileSync(this.stateFile+'.tmp',JSON.stringify(this.state));fs.renameSync(this.stateFile+'.tmp',this.stateFile);}
-  // Returns the inserted top-level nodes. removeAnchor replaces the anchor (used to extend the previous paragraph) in the same undo step.
+  // Returns the inserted top-level nodes (nodeOf(spec) finds the node built for any spec). removeAnchor replaces the anchor in the same undo step.
   transaction(anchor,specs,before=true,removeAnchor=false) {
     const e=this.e,U=e.undo.UndoManager;const scroll=this.w.document.querySelector('content');
     const top=scroll?.scrollTop,left=scroll?.scrollLeft;
     let cursor;try{cursor=e.selection.buildUndo()}catch{cursor=e.lastCursor}
     e.undo.endSnap(true);
-    const command=U.makeEmptyCommand(cursor);let previous=anchor;const inserted=[];
+    const command=U.makeEmptyCommand(cursor);let previous=anchor;const inserted=[],built=new Map();
     for(const spec of specs) {
       const build=spec=>{
         const {children,...attributes}=spec;const node=new anchor.constructor(attributes);
         for(const child of children||[])build(child).set('parent',node);
-        return node;
+        built.set(spec,node);return node;
       };
       const node=build(spec);
       if(before){anchor.addBefore(node);e.findElemById(anchor.cid).before(node.toHTML());}
@@ -60,6 +59,7 @@ class EditorAdapter {
     if(cursor)command.redo.push(cursor);
     e.undo.register(command);
     if(scroll){scroll.scrollTop=top;scroll.scrollLeft=left;}
+    inserted.nodeOf=spec=>built.get(spec);
     return inserted;
   }
   bind() {
@@ -83,32 +83,41 @@ class EditorAdapter {
     }
     if(!this.e.nodeMap.getLast())throw new Error('请先在文档中写入一个标题并保存');
   }
-  // Window results: a new topic opens a numbered item (bold title); its paragraphs and continuations follow as plain paragraphs.
-  // A continuation joins the previous inserted paragraph while that paragraph is short, untouched and still the last block,
-  // so small low-latency windows still read as coherent paragraphs.
+  // Window results: every paragraph is one main idea and becomes a numbered item. When the model marks the first paragraph
+  // as a continuation, it is appended to the last inserted item (same undo step) while that item is still the last block
+  // and untouched; otherwise the continuation is added as a plain paragraph so no new number is started.
+  // Events without paragraphs (legacy per-utterance results) are appended as numbered items.
   insert(event) {
     if(!this.safe())throw new Error('编辑状态改变，等待安全插入');
     if(!/^[a-zA-Z0-9:_-]+$/.test(event.eventId))throw new Error('Invalid event id');
     let number=this.state.number;const specs=[];let anchor=this.e.nodeMap.getLast(),replace=false;
-    if(Array.isArray(event.blocks)){
-      event.blocks.forEach((block,index)=>{
-        if(block.topic==='new'){number++;specs.push(orderedItem(number,`**${escapeText(String(block.title||'').trim()||'记录')}**`));}
-        const paragraphs=(block.paragraphs||[]).map(p=>String(p).trim()).filter(Boolean).map(escapeParagraph);
-        if(index===0&&block.topic==='continue'&&paragraphs.length&&this.canJoin(anchor,paragraphs[0])){paragraphs[0]=this.lastParagraph.text+paragraphs[0];replace=true;}
-        for(const text of paragraphs)specs.push({type:'paragraph',text});
+    if(Array.isArray(event.paragraphs)){
+      const paragraphs=event.paragraphs.map(p=>String(p).trim()).filter(Boolean).map(escapeParagraph);
+      paragraphs.forEach((text,index)=>{
+        if(index===0&&event.continues){
+          const target=this.continuable(anchor);
+          if(target){anchor=target;replace=true;specs.push(orderedItem(this.lastItem.number,this.lastItem.text+text));}
+          else specs.push({type:'paragraph',text});
+          return;
+        }
+        number++;specs.push(orderedItem(number,text));
       });
     } else {number++;specs.push(orderedItem(number,escapeText(event.text)));}
     this.state.number=number;this.state.events[event.eventId]='pending';this.persist();
     if(specs.length){
-      const result=this.transaction(anchor,specs,false,replace),nodes=Array.isArray(result)?result:[];
-      const last=nodes[nodes.length-1];
-      this.lastParagraph=last&&last.get('type')==='paragraph'?{cid:last.cid,text:last.get('text')}:null;
+      const nodes=this.transaction(anchor,specs,false,replace),last=specs[specs.length-1];
+      const list=Array.isArray(nodes)?nodes[nodes.length-1]:null,item=last.type==='list'?last.children[0].children[0]:null;
+      this.lastItem=list&&item?{cid:list.cid,paragraph:nodes.nodeOf?.(item)?.cid,text:item.text,number:last.start}:null;
     }
     (this.inserted||=new Set()).add(event.eventId);
   }
-  canJoin(anchor,next){
-    const last=this.lastParagraph;
-    return !!(last&&anchor&&anchor.cid===last.cid&&anchor.get('type')==='paragraph'&&anchor.get('text')===last.text&&last.text.length<JOIN_BELOW&&last.text.length+next.length<=JOIN_MAX);
+  // The list node of the last inserted item, when it can still be extended safely.
+  continuable(anchor){
+    const last=this.lastItem;if(!last||!anchor)return null;
+    const list=anchor.cid===last.cid?anchor:anchor.cid===last.paragraph?this.e.getNode?.(last.cid):null;
+    if(!list||list.get('type')!=='list')return null;
+    const paragraph=last.paragraph&&this.e.getNode?.(last.paragraph);
+    return paragraph&&paragraph.get('text')===last.text?list:null;
   }
 
   checkDisk() {
