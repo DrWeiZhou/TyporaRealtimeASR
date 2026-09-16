@@ -31,8 +31,12 @@ try{
     $gh=Get-Command gh -ErrorAction SilentlyContinue
     if($gh){
         Write-Host '== 创建 GitHub Release 并上传安装包 =='
+        # PowerShell 5.1 turns redirected stderr into errors; this probe is allowed to fail.
+        $ErrorActionPreference='Continue'
         & $gh.Source release view $tag *> $null
-        if($LASTEXITCODE -eq 0){
+        $releaseExists=$LASTEXITCODE -eq 0
+        $ErrorActionPreference='Stop'
+        if($releaseExists){
             & $gh.Source release upload $tag $setup "$setup.sha256" $zip "$zip.sha256" --clobber
         } else {
             & $gh.Source release create $tag $setup "$setup.sha256" $zip "$zip.sha256" --title "TyporaRealtimeASR $tag" --notes "Windows x64 安装程序：TyporaRealtimeASR-v$Version-Setup.exe（含自包含服务与 Typora 插件）。详见 README“安装发布包”。"
