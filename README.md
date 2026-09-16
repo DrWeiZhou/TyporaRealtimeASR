@@ -31,9 +31,22 @@ Windows 本地 Qwen3-ASR 实时语音记录插件，当前适配 **Typora 1.14.1
 
 服务运行时显示“终止服务”：先保存当前录音并关闭转写服务，再关闭本项目启动且身份匹配的模型进程。未完成的识别和润色保留在本地，重新启动后点击“恢复记录”继续处理。外部启动的模型及没有新版启动记录的旧模型不会被结束。应用不自动开始录音。
 
-## 安装发布包 v0.3.2
+## 安装发布包 v0.4.0
 
-解压 `TyporaRealtimeASR-v0.3.2-win-x64.zip` 到长期保留的目录。发布包包含自包含服务，不需要安装 .NET；模型权重和 llama-server 仍需自行准备。
+### 使用安装程序（推荐）
+
+运行 `TyporaRealtimeASR-v0.4.0-Setup.exe`（可用同名 `.sha256` 文件核对）：
+
+1. 选择安装目录，默认 `%LOCALAPPDATA%\Programs\TyporaRealtimeASR`。目录需长期保留且当前用户可写，服务数据 `.asr` 也保存在这里。
+2. 升级时选择原目录即可：安装程序会先停止该目录中运行的服务，覆盖程序文件，保留 `config.local.json`、`.asr` 和录音。
+3. 在弹出的管理员授权中点击“是”，安装 Typora 插件（默认 Typora 位于 `C:\Program Files\Typora`，找不到时会询问）。
+4. 完全退出并重新打开 Typora，点击“启动服务”。只用在线 ASR 时无需本地模型；使用本地模型时编辑安装目录中的 `config.local.json`。
+
+命令行参数：`--dir <安装目录>`、`--typora <Typora 目录>`、`--skip-plugin`、`--quiet`（不提问，使用默认值）。开发者可运行 `powershell -ExecutionPolicy Bypass -File tools/build-installer.ps1 -Version 0.4.0` 生成安装程序和 ZIP；双击 `release.cmd` 则在构建成功后打标签、推送 `main` 与标签，并在装有 GitHub CLI 时创建 Release 上传安装包。
+
+### 使用 ZIP 手动安装
+
+解压 `TyporaRealtimeASR-v0.4.0-win-x64.zip` 到长期保留的目录。发布包包含自包含服务，不需要安装 .NET；模型权重和 llama-server 仍需自行准备。
 
 安装前准备：Windows x64、Typora 1.14.10、支持 Qwen3-ASR 音频输入的 `llama-server.exe`、主模型 GGUF 和配套 mmproj GGUF。模型路径可复用已有文件，不必放进插件目录。安装包中的 `config.example.json` 提供完整字段示例；`device` 默认使用 `Vulkan0`，应填写本机实际设备。
 

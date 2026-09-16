@@ -1,4 +1,4 @@
-﻿param([string]$Version='0.3.2')
+﻿param([string]$Version='0.4.0')
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Invalid release version'}
 $projectRoot=Split-Path $PSScriptRoot -Parent
@@ -13,6 +13,8 @@ foreach($directory in @('src\typora-plugin','tools','docs')){
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Copy-Item -Path (Join-Path $projectRoot ($directory+'\*')) -Destination $destination -Recurse -Force
 }
+# The installer project is build tooling, not part of the installed package.
+Remove-Item -LiteralPath (Join-Path $package 'tools\installer') -Recurse -Force -ErrorAction SilentlyContinue
 foreach($file in @('README.md','LICENSE','config.example.json','start.cmd','install.cmd')){Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $package}
 Set-Content -LiteralPath (Join-Path $package 'VERSION.txt') -Value $Version -Encoding ASCII
 $archive=Join-Path $projectRoot "artifacts\$name.zip"
