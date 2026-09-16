@@ -20,6 +20,24 @@ class EditorAdapter {
   anchors(){return this.nodes().filter(n=>this.isMarker(n,this.marker()));}
   safe(){return this.path()===this.boundPath && !this.composing && !this.e.isIME && !this.conflict && !this.e.sourceView.inSourceMode && !this.w.File.isLocked && !this.w.File.isFileLoading() && !!this.e.nodeMap.getLast();}
   contains(id){return !!(this.state?.events[id]==='saved'||this.inserted?.has(id)) || this.nodes().some(n=>this.isMarker(n,`<!-- asr-event:${id} -->`));}
+  // Document content is the source of truth for list numbering so a new/cleared file restarts at 1.
+  syncNumberFromDocument() {
+    let max=0;
+    const walk=node=>{
+      if(!node)return;
+      if(node.get('type')==='list' && node.get('style')==='ol'){
+        const start=Number(node.get('start'));
+        const begin=Number.isFinite(start)&&start>0?start:1;
+        let items=0;
+        for(const child of node.get('children')||[])if(child.get('type')==='list_item')items++;
+        if(items>0)max=Math.max(max,begin+items-1);
+        else max=Math.max(max,begin-1);
+      }
+      for(const child of node.get('children')||[])walk(child);
+    };
+    for(const n of this.nodes())walk(n);
+    this.state.number=max;
+  }
   persist(){const fs=this.w.reqnode('fs'),path=this.w.reqnode('path');fs.mkdirSync(path.dirname(this.stateFile),{recursive:true});fs.writeFileSync(this.stateFile+'.tmp',JSON.stringify(this.state));fs.renameSync(this.stateFile+'.tmp',this.stateFile);}
   transaction(anchor,specs,before=true) {
     const e=this.e,U=e.undo.UndoManager;const scroll=this.w.document.querySelector('content');
@@ -52,6 +70,8 @@ class EditorAdapter {
       if(event){this.state.events[event[1]]=disk.includes(text)?'saved':'pending';this.inserted.add(event[1]);}
       if(number)this.state.number=Math.max(this.state.number,Number(number[1]));
     }
+    // Prefer live ordered lists over durable counter so empty/new docs start at 1.
+    this.syncNumberFromDocument();
     this.persist();
     if(legacy.length){
       const e=this.e,U=e.undo.UndoManager;let cursor;try{cursor=e.selection.buildUndo()}catch{cursor=e.lastCursor}
