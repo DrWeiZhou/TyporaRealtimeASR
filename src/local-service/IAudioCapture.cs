@@ -4,7 +4,7 @@ public readonly record struct AudioDeviceInfo(int Id, string Name, string Kind =
 
 /// <summary>
 /// Cross-platform audio capture abstraction (Phase 0).
-/// Windows: <see cref="WasapiAudioCapture"/> (microphone + system loopback). Mac/Linux: not implemented yet.
+/// Windows: WasapiAudioCapture (microphone + system loopback). macOS: CoreAudioCapture (microphone; virtual loopback devices). Linux: not implemented.
 /// </summary>
 public interface IAudioCapture : IDisposable
 {

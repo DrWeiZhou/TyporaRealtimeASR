@@ -36,7 +36,7 @@ public sealed class RecordingSession : IAsyncDisposable
     public bool Recording=>recording;
     public RecordingSession(string id,string document,string path,string root,Ledger ledger,ISpeechRecognizer asr,bool recover=false,IAudioCaptureFactory? audioFactory=null) {
         Id=id;DocumentId=document;Path=path;this.ledger=ledger;this.asr=asr;
-        this.audioFactory=audioFactory??new WasapiAudioCaptureFactory();
+        this.audioFactory=audioFactory??PlatformServices.CreateAudioCaptureFactory();
         ledger.CreateSession(id,document,path);
         audio=new AudioStore(SessionFiles.PrepareAudio(root,id,path));
         try{ledger.ExportTranscript(id);}catch{audio.Dispose();throw;}

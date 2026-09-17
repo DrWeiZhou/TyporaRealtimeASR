@@ -25,3 +25,7 @@ NAudio (WASAPI), `PcmConverter`, and DPAPI P/Invoke still require Windows. Isola
 4. Wire factory selection by RID/`OperatingSystem.IsMacOS()`.
 
 5. Keep plugin ports/protocols unchanged.
+
+## Phase 1 (macOS) status
+
+Done. The TFM is now chosen per platform (`TyporaAsrPlatform`): `net10.0-windows` with NAudio on Windows, `net10.0` with NAudio.Core, Core Audio capture and Keychain on macOS. The plugin runs on Typora for macOS through `host-mac.cjs`. See `docs/macos.md`.

@@ -1,6 +1,6 @@
 # TyporaRealtimeASR
 
-Windows 本地 Qwen3-ASR 实时语音记录插件，当前适配 **Typora 1.14.10**。
+Windows / macOS 本地 Qwen3-ASR 实时语音记录插件，当前适配 **Typora 1.14.10**。macOS 版的安装与差异见下方“macOS 版”及 [docs/macos.md](docs/macos.md)。
 
 麦克风 → 本地 Qwen3-ASR → 带时间戳的原始逐字稿 → 在线 LLM 润色 → Typora 追加并保存 Markdown。你可以同时修改已经写入的内容，后续识别不会重写历史段落。在线润色接口仅接收确认的逐字稿片段，不接收音频或人工笔记；只有在面板启用“在线 ASR”后，录音片段才会发送给你配置的在线 ASR 服务。
 
@@ -175,6 +175,24 @@ node --test tests/editor/http.test.cjs
 - **防火墙权限**：本项目仅使用回环地址，不需要向局域网开放端口。`tools/repair-firewall.ps1` 可在管理员授权下添加仅限本机 TCP 18082 的规则。
 
 Qwen 与 llama.cpp 基准来源保留在原启动指引中；本次复测报告与历史结果分开保存。
+
+## macOS 版
+
+macOS 版与 Windows 版共用服务逻辑和面板，平台相关部分改为：Core Audio 录音、钥匙串加密 API Key、bash 启动/终止脚本、AppleScript 选择窗口，以及适配 Mac 版 Typora（非 Electron）的插件宿主层。详细对照表和真机验收清单见 [docs/macos.md](docs/macos.md)。
+
+```bash
+cp config.example.mac.json config.local.json   # 首次安装：填写 llama-server、模型路径（device 留空使用 Metal）
+bash tools/mac/publish.sh                      # 需要 .NET 10 SDK，生成 runtime/publish-mac/TyporaASR Service.app
+bash tools/mac/install-plugin.sh               # 先完全退出 Typora；非 1.14.10 版本需加 --trust-typora-version
+bash tools/mac/start.sh                        # 或双击 start.command，或在面板点“启动服务”
+```
+
+- 首次录音时系统会询问是否允许“TyporaASR Service”使用麦克风；拒绝后可在“系统设置 → 隐私与安全性 → 麦克风”中开启。
+- 快捷键为 Control+Option+R。系统声音需借助 BlackHole 等虚拟声卡，这类设备会出现在“系统声音”分组。
+- 安装前请先正常打开一次 Typora 再退出；安装脚本需要写入 `/Applications/Typora.app`，无法写入时请在“系统设置 → 隐私与安全性 → App 管理”中允许终端。不要对 Typora 重新签名。Typora 更新后需先打开一次新版再重新安装入口。
+- 首次保存时会询问是否允许“TyporaASR Service”控制 Typora（Mac 版由服务调用 Typora 原生保存），请选择允许。
+- 一键更新：`bash tools/mac/update.sh`（或双击 `update.command`）；测试：`bash tools/mac/test.sh`；打包：`bash tools/mac/release.sh 0.4.0`。
+- Windows 上加密的 `.asr` 配置不能在 Mac 上解密，请用“配置导出/导入”迁移。
 
 ## 许可证
 

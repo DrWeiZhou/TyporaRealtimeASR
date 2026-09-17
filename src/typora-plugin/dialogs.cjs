@@ -1,6 +1,8 @@
 'use strict';
 // Native dialogs for the Typora window. Each tries Typora's JSBridge dialog, then Electron remote dialogs, and finally
-// the Windows dialogs through PowerShell. Resolves to the chosen absolute path, or null when cancelled.
+// the Windows dialogs through PowerShell. On macOS (no Node/Electron) AppleScript pickers are used.
+// Resolves to the chosen absolute path, or null when cancelled.
+const {hostOf}=require('./host.cjs');
 const JSON_FILTERS=[{name:'JSON 配置文件',extensions:['json']}];
 const WINDOWS_FILTER='JSON 配置文件 (*.json)|*.json|所有文件 (*.*)|*.*';
 const PREAMBLE=['$ErrorActionPreference="Stop"','[Console]::OutputEncoding=[Text.Encoding]::UTF8','Add-Type -AssemblyName System.Windows.Forms','$owner=New-Object System.Windows.Forms.Form -Property @{TopMost=$true}'];
@@ -27,6 +29,11 @@ const fromResult=result=>{
 };
 async function show(w,kind,{title,defaultPath='',filters}){
  const save=kind==='save',method=save?'showSaveDialog':'showOpenDialog';
+ const host=hostOf(w);
+ if(host?.platform==='mac'){
+  const mac=host.node('path');
+  return host.pick(kind,{title,defaultPath:kind==='save'&&defaultPath?mac.dirname(defaultPath):defaultPath,defaultName:kind==='save'&&defaultPath?mac.basename(defaultPath):''});
+ }
  const options={title,defaultPath:defaultPath||undefined,filters,properties:kind==='folder'?['openDirectory','createDirectory']:save?['showOverwriteConfirmation']:['openFile']};
  if(w.JSBridge?.invoke){
   // An unsupported handler resolves to nothing; only a real dialog result (chosen or cancelled) is final.

@@ -1,6 +1,8 @@
 using TyporaAsr;
 using NAudio.Wave;
+#if TYPORA_WINDOWS
 using NAudio.CoreAudioApi;
+#endif
 
 if(args.Length==3 && args[0]=="--segment-wav"){
  using var input=new FileStream(args[1],FileMode.Open,FileAccess.Read,FileShare.ReadWrite);using var wav=new WaveFileReader(input);
@@ -116,6 +118,15 @@ if(args.Length==2 && args[0]=="--live") {
  }finally{Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();Directory.Delete(root,true);}
 }
 if(args.Contains("--capture")){
+#if TYPORA_MAC
+ try{
+  using var capture=new CoreAudioCapture();long received=0;
+  capture.PcmAvailable+=pcm=>Interlocked.Add(ref received,pcm.Length);
+  capture.Start(CoreAudioCapture.DefaultInputDeviceId);await Task.Delay(2200);capture.RequestStop();await capture.WaitStoppedAsync(TimeSpan.FromSeconds(5));
+  if(received==0)throw new Exception("No audio frames received");
+  Console.WriteLine($"PASS Core Audio microphone capture: {received} samples (16 kHz mono); devices: "+string.Join(" / ",new CoreAudioCaptureFactory().EnumerateDevices().Select(d=>d.Name)));
+ }catch(Exception e){failures++;Console.WriteLine("FAIL Core Audio microphone capture: "+e);}
+#else
  try{
   using var capture=new WasapiCapture();long received=0;
   capture.DataAvailable+=(_,e)=>Interlocked.Add(ref received,e.BytesRecorded);
@@ -123,6 +134,7 @@ if(args.Contains("--capture")){
   if(received==0)throw new Exception("No audio frames received");
   Console.WriteLine($"PASS WASAPI microphone capture: {received} bytes, {capture.WaveFormat}");
  }catch(Exception e){failures++;Console.WriteLine("FAIL WASAPI microphone capture: "+e);}
+#endif
 }
 if(args.Contains("--pause-capture")){
  var root=Path.Combine(Path.GetTempPath(),"asr-pause-capture-"+Guid.NewGuid());Directory.CreateDirectory(root);

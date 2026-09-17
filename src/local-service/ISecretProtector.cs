@@ -2,7 +2,7 @@ namespace TyporaAsr;
 
 /// <summary>
 /// Protects secrets at rest (Phase 0).
-/// Windows: <see cref="DpapiSecretProtector"/>. Mac Keychain / Linux: deferred.
+/// Windows: DpapiSecretProtector. macOS: KeychainSecretProtector. Linux: deferred.
 /// </summary>
 public interface ISecretProtector
 {
