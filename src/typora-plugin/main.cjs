@@ -3,11 +3,13 @@ const {EditorAdapter}=require('./editor-adapter.cjs');
 const {TranscriptController}=require('./controller.cjs');
 const {ServiceClient}=require('./client.cjs');
 const {makeDraggable}=require('./panel-drag.cjs');
+const {node,shortcutLabel}=require('./host.cjs');
 
 module.exports=function mount(w,config){
  if(w.typoraRealtimeAsr)return w.typoraRealtimeAsr;
- const d=w.document,crypto=w.reqnode('crypto'),fs=w.reqnode('fs'),path=w.reqnode('path');
+ const d=w.document,crypto=node(w,'crypto'),fs=node(w,'fs'),path=node(w,'path'),shortcut=shortcutLabel(w);
  const client=new ServiceClient(w,config.connectionFile);
+ if(w.typoraAsrHost)w.typoraAsrHost.saveViaService=name=>client.request('POST','/mac/save-document',{name});
  const stateFile=path.join(path.dirname(config.connectionFile),'plugin-documents.json');
  let documents={};try{documents=JSON.parse(fs.readFileSync(stateFile,'utf8'))}catch{}
  let adapter,controller,session,serviceStopping=false,busy=false,controlBusy=false,controlRevision=0,replayRevision=0,after=0,lastSave=0,lastStatus='',pending=new Map(),toSave=new Map(),observed=new Set(),retrying=new Set(),lastPolishCompleted;
@@ -18,7 +20,7 @@ module.exports=function mount(w,config){
  #asr-panel::before{content:'';position:absolute;top:5px;left:50%;width:40px;height:4px;margin-left:-20px;border-radius:2px;background:#8885}#asr-panel.asr-dragging{opacity:.92;box-shadow:0 12px 40px #0004}
  #asr-preview{padding:12px;border-left:3px solid #458a71;min-height:65px;background:#458a7110;white-space:pre-wrap}#asr-status{color:#697870;font-size:12px}#asr-review>div{border-top:1px solid #8884;margin-top:12px;padding-top:8px}#asr-panel small{color:#777}#asr-devices{max-width:100%}
  `;d.head.appendChild(style);
- const panel=d.createElement('section');panel.id='asr-panel';panel.innerHTML=`<h3>语音记录</h3><button id="asr-minimize" title="缩小面板" aria-label="缩小面板" aria-expanded="true">−</button><button id="asr-close" title="关闭窗口" aria-label="关闭窗口">×</button><small id="asr-mode">正在检测识别方式 · 在线润色后自动补充</small><div id="asr-preview" role="status">当前句将在这里实时显示。</div><p id="asr-target">尚未绑定文档</p><select id="asr-devices" aria-label="录音设备"><option value="-1">默认麦克风</option></select><div><button id="asr-start">开始录音</button><button id="asr-pause" disabled>暂停</button><button id="asr-stop" disabled>结束录音</button><button id="asr-recover">恢复记录</button></div><p id="asr-status">准备就绪。Ctrl+Alt+R 展开或缩小面板。</p><div id="asr-review"></div>`;
+ const panel=d.createElement('section');panel.id='asr-panel';panel.innerHTML=`<h3>语音记录</h3><button id="asr-minimize" title="缩小面板" aria-label="缩小面板" aria-expanded="true">−</button><button id="asr-close" title="关闭窗口" aria-label="关闭窗口">×</button><small id="asr-mode">正在检测识别方式 · 在线润色后自动补充</small><div id="asr-preview" role="status">当前句将在这里实时显示。</div><p id="asr-target">尚未绑定文档</p><select id="asr-devices" aria-label="录音设备"><option value="-1">默认麦克风</option></select><div><button id="asr-start">开始录音</button><button id="asr-pause" disabled>暂停</button><button id="asr-stop" disabled>结束录音</button><button id="asr-recover">恢复记录</button></div><p id="asr-status">准备就绪。${shortcut} 展开或缩小面板。</p><div id="asr-review"></div>`;
  const toggle=d.createElement('button');toggle.id='asr-toggle';toggle.textContent='语音记录';d.body.append(panel,toggle);
  const drag=makeDraggable(w,panel);
  const $=id=>panel.querySelector('#'+id);
@@ -34,13 +36,13 @@ module.exports=function mount(w,config){
  toggle.onclick=()=>setView(view==='expanded'?'compact':'expanded');
  $('asr-minimize').onclick=()=>setView(view==='compact'?'expanded':'compact');
  $('asr-close').onclick=()=>{
-  if(w.confirm('关闭后，可按 Ctrl + Alt + R 恢复显示。\n录音和服务会继续运行。\n确定关闭语音记录窗口吗？'))setView('closed');
+  if(w.confirm(`关闭后，可按 ${shortcut} 恢复显示。\n录音和服务会继续运行。\n确定关闭语音记录窗口吗？`))setView('closed');
  };
  const onKeyDown=e=>{if(e.ctrlKey&&e.altKey&&e.code==='KeyR'){e.preventDefault();setView(view==='expanded'?'compact':'expanded');}};
  d.addEventListener('keydown',onKeyDown);
  const awaitingPolish=s=>Math.max(0,(s?.polish?.pending||0)-(s?.polish?.failed||0));
  const ack=(eventId,state)=>client.request('POST',`/sessions/${session.sessionId}/ack`,{eventId,state});
- function bind(documentId){adapter?.dispose();adapter=new EditorAdapter(w,documentId,path.dirname(config.connectionFile));controller=new TranscriptController(adapter,ack,adapter.path());$('asr-target').textContent='记录到：'+path.basename(adapter.path());}
+ function bind(documentId){adapter?.dispose();adapter=new EditorAdapter(w,documentId,path.dirname(config.connectionFile),{verifiedVersions:config.verifiedTyporaVersions});controller=new TranscriptController(adapter,ack,adapter.path());$('asr-target').textContent='记录到：'+path.basename(adapter.path());}
  function remember(documentId){documents[adapter.path().toLowerCase()]={documentId,sessionId:session.sessionId};fs.mkdirSync(path.dirname(stateFile),{recursive:true});const tmp=stateFile+'.'+client.id+'.tmp';fs.writeFileSync(tmp,JSON.stringify(documents,null,2));fs.renameSync(tmp,stateFile);}
  async function refreshDevices(){try{const devices=await client.request('GET','/devices');const sel=$('asr-devices');sel.replaceChildren();const mic=d.createElement('optgroup');mic.label='麦克风';const sys=d.createElement('optgroup');sys.label='系统声音';for(const x of devices){const o=d.createElement('option');o.value=x.id;o.textContent=x.name;(x.kind==='system'?sys:mic).appendChild(o);}if(mic.childElementCount)sel.appendChild(mic);if(sys.childElementCount)sel.appendChild(sys);}catch(e){showError(e)}}
 async function start(){

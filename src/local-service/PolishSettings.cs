@@ -15,14 +15,14 @@ public sealed class PolishSettings {
 8. 结构化：按段落写，每段第一句为该段主题或总结。不为结构化而拆分或扩充内容。
 9. 直接输出整理后的需求记录正文，不要任何解释、备注、前言或后缀，不要使用包裹正文的代码围栏。
 """;
- private static readonly ISecretProtector DefaultProtector=new DpapiSecretProtector();
+ private static ISecretProtector DefaultProtector=>PlatformServices.SecretProtector;
  private readonly string file;private readonly object gate=new();private readonly ISecretProtector protector;
  public PolishSettings(string root,ISecretProtector? protector=null){file=Path.Combine(root,"polish-settings.json");this.protector=protector??DefaultProtector;}
  public PolishConfig? Current(){lock(gate){if(!File.Exists(file))return null;return JsonSerializer.Deserialize<PolishConfig>(protector.Unprotect(JsonSerializer.Deserialize<string>(File.ReadAllText(file))!));}}
  public object Public(){var c=Current();return new {baseUrl=c?.BaseUrl??"",model=c?.Model??"",prompt=c?.Prompt??DefaultPrompt,hasKey=!string.IsNullOrEmpty(c?.ApiKey)};}
  public void Save(PolishConfig c){lock(gate){if(string.IsNullOrWhiteSpace(c.ApiKey))c=c with{ApiKey=Current()?.ApiKey??""};Validate(c);var tmp=file+".tmp";File.WriteAllText(tmp,JsonSerializer.Serialize(protector.Protect(JsonSerializer.Serialize(c))));File.Move(tmp,file,true);}}
  public static void Validate(PolishConfig c){if(!Uri.TryCreate(c.BaseUrl,UriKind.Absolute,out var uri)||uri.Scheme!="https"||!string.IsNullOrEmpty(uri.UserInfo)||!string.IsNullOrEmpty(uri.Query)||!string.IsNullOrEmpty(uri.Fragment))throw new ArgumentException("在线 API 地址必须为 HTTPS，且不含用户名、查询参数或片段");if(string.IsNullOrWhiteSpace(c.Model)||string.IsNullOrWhiteSpace(c.ApiKey)||string.IsNullOrWhiteSpace(c.Prompt))throw new ArgumentException("请填写模型、API Key 和润色提示词");if(c.Prompt.Length>16000||c.ApiKey.Length>4096||c.Model.Length>256)throw new ArgumentException("配置内容过长");}
- // Static wrappers keep PolishPipeline call sites unchanged (same DPAPI default).
+ // Static wrappers keep PolishPipeline call sites unchanged (same platform default: DPAPI on Windows, Keychain on macOS).
  public static string Protect(string text)=>DefaultProtector.Protect(text);
  public static string Unprotect(string text)=>DefaultProtector.Unprotect(text);
 }

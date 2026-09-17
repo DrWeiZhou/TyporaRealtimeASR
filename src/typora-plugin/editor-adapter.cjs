@@ -1,20 +1,24 @@
 'use strict';
+const {node,hostOf}=require('./host.cjs');
 const normalize=s=>s.replace(/^\uFEFF/,'').replace(/\r\n/g,'\n');
 const escapeText=s=>s.replace(/[\\`*_{}\[\]<>#]/g,'\\$&').replace(/[\r\n]+/g,' ');
 // Paragraphs must not be re-parsed as list items when they start with a number or bullet.
 const escapeParagraph=s=>escapeText(String(s).trim()).replace(/^(\d+)([.)])/,'$1\\$2').replace(/^([-+])(\s)/,'\\$1$2');
+// Editor internals were verified on this Typora build; others refuse automatic writing unless listed in config.json.
+const VERIFIED_TYPORA_VERSIONS=['1.14.10'];
 const orderedItem=(start,text)=>({type:'list',style:'ol',start,isFixed:false,children:[{type:'list_item',children:[{type:'paragraph',text}]}]});
 class EditorAdapter {
-  constructor(w,documentId,stateRoot) {
+  constructor(w,documentId,stateRoot,options={}) {
     this.w=w;this.e=w.File.editor;this.documentId=documentId;this.boundPath=this.path();this.composing=false;this.conflict=false;
-    const fs=w.reqnode('fs'),path=w.reqnode('path'),crypto=w.reqnode('crypto');
+    const fs=node(w,'fs'),path=node(w,'path'),crypto=node(w,'crypto');this.host=hostOf(w);
     this.stateFile=path.join(stateRoot||path.join(path.dirname(this.boundPath),'.asr'),'editor-state',crypto.createHash('sha256').update(this.boundPath.toLowerCase()+'|'+documentId).digest('hex')+'.json');
     this.state={number:0,events:{}};this.inserted=new Set();
     if(fs.existsSync(this.stateFile)){this.state=JSON.parse(fs.readFileSync(this.stateFile,'utf8'));if(!Number.isSafeInteger(this.state.number)||!this.state.events)throw new Error('插入状态文件损坏，请保留文件并检查');}
     this.onStart=()=>{this.composing=true};this.onEnd=()=>{this.composing=false};
     w.document.addEventListener('compositionstart',this.onStart,true);w.document.addEventListener('compositionend',this.onEnd,true);
-    if(w._options.appVersion!=='1.14.10')throw new Error('当前仅验证 Typora 1.14.10；已停止自动写入');
-    if(!this.e.undo?.UndoManager?.addUndoForInsert || !this.e.nodeMap?.getLast || !w.File.saveUseNode)throw new Error('编辑器接口不兼容');
+    const verified=Array.isArray(options.verifiedVersions)&&options.verifiedVersions.length?options.verifiedVersions:VERIFIED_TYPORA_VERSIONS;
+    if(!verified.includes(w._options?.appVersion))throw new Error(`当前仅验证 Typora ${verified.join(' / ')}（本机 ${w._options?.appVersion||'未知'}）；已停止自动写入`);
+    if(!this.e.undo?.UndoManager?.addUndoForInsert || !this.e.nodeMap?.getLast || !(w.File.saveUseNode||w.File.save))throw new Error('编辑器接口不兼容');
   }
   path(){return this.w.File.bundle?.filePath||'';}
   nodes(){return [...this.w.document.querySelectorAll('#write > [cid]')].map(el=>this.e.getNode(el.getAttribute('cid'))).filter(Boolean);}
@@ -36,7 +40,7 @@ class EditorAdapter {
     }
     this.state.number=max;
   }
-  persist(){const fs=this.w.reqnode('fs'),path=this.w.reqnode('path');fs.mkdirSync(path.dirname(this.stateFile),{recursive:true});fs.writeFileSync(this.stateFile+'.tmp',JSON.stringify(this.state));fs.renameSync(this.stateFile+'.tmp',this.stateFile);}
+  persist(){const fs=node(this.w,'fs'),path=node(this.w,'path');fs.mkdirSync(path.dirname(this.stateFile),{recursive:true});fs.writeFileSync(this.stateFile+'.tmp',JSON.stringify(this.state));fs.renameSync(this.stateFile+'.tmp',this.stateFile);}
   // Returns the inserted top-level nodes (nodeOf(spec) finds the node built for any spec). removeAnchor replaces the anchor in the same undo step.
   transaction(anchor,specs,before=true,removeAnchor=false) {
     const e=this.e,U=e.undo.UndoManager;const scroll=this.w.document.querySelector('content');
@@ -66,7 +70,7 @@ class EditorAdapter {
     if(this.path()!==this.boundPath || this.composing || this.e.isIME || this.e.sourceView.inSourceMode || this.w.File.isLocked)throw new Error('请在普通编辑模式中绑定已保存的 Markdown');
     // Migrate only exact plugin comments, leaving human content and unrelated HTML intact.
     const legacy=this.nodes().filter(n=>['paragraph','html_block'].includes(n.get('type'))&&/^<!-- asr-(?:insert:[a-zA-Z0-9:_-]+|event:[a-zA-Z0-9:_-]+|number:[a-zA-Z0-9:_-]+:\d+) -->$/.test((n.get('text')||'').trim()));
-    const disk=this.w.reqnode('fs').readFileSync(this.boundPath,'utf8');
+    const disk=node(this.w,'fs').readFileSync(this.boundPath,'utf8');
     for(const n of legacy){
       const text=n.get('text').trim(),event=text.match(/^<!-- asr-event:([a-zA-Z0-9:_-]+) -->$/),number=text.match(/^<!-- asr-number:.*:(\d+) -->$/);
       if(event){this.state.events[event[1]]=disk.includes(text)?'saved':'pending';this.inserted.add(event[1]);}
@@ -122,7 +126,7 @@ class EditorAdapter {
 
   checkDisk() {
     if(this.path()!==this.boundPath)return false;
-    const fs=this.w.reqnode('fs');
+    const fs=node(this.w,'fs');
     const disk=normalize(fs.readFileSync(this.boundPath,'utf8'));
     const saved=normalize(this.w.File.bundle.savedContent||'');
     if(!this.w.File.inSavingProcess && disk!==saved){this.conflict=true;return false;}
@@ -131,10 +135,30 @@ class EditorAdapter {
   async save() {
     if(!this.safe() || !this.checkDisk())return false;
     const expected=normalize(this.e.getMarkdown());
-    const result=await this.w.File.saveUseNode(false,true);
-    if(result!==true || this.path()!==this.boundPath)return false;
-    if(normalize(this.w.reqnode('fs').readFileSync(this.boundPath,'utf8'))!==expected)return false;
-    for(const id of this.inserted)this.state.events[id]='saved';this.persist();return true;
+    const fs=node(this.w,'fs'),File=this.w.File;
+    const onDisk=()=>{try{return normalize(fs.readFileSync(this.boundPath,'utf8'))===expected}catch{return false}};
+    if(this.host?.saveDocument){
+      // macOS: native save through AppleScript, then confirm by reading the file back.
+      if(!await this.host.saveDocument(this.boundPath))return false;
+      let ok=false;
+      for(let i=0;i<50&&!ok;i++){if(this.path()!==this.boundPath)return false;ok=onDisk();if(!ok)await new Promise(r=>this.w.setTimeout(r,100));}
+      if(!ok)return false;
+      // Keep Typora's own disk-conflict baseline in step with the file it just wrote.
+      if(normalize(File.bundle.savedContent||'')!==expected)File.bundle.savedContent=fs.readFileSync(this.boundPath,'utf8');
+    } else if(File.saveUseNode){
+      const result=await File.saveUseNode(false,true);
+      if(result!==true || this.path()!==this.boundPath)return false;
+      if(!onDisk())return false;
+    } else {
+      // macOS: File.save() does not report success; confirm by reading the file back.
+      await File.save();
+      let ok=false;
+      for(let i=0;i<50&&!ok;i++){if(this.path()!==this.boundPath)return false;ok=onDisk()&&!File.inSavingProcess;if(!ok)await new Promise(r=>this.w.setTimeout(r,100));}
+      if(!ok)return false;
+    }
+    for(const id of this.inserted)this.state.events[id]='saved';this.persist();
+    if(this.host)await this.host.flush();
+    return true;
   }
   dispose(){this.w.document.removeEventListener('compositionstart',this.onStart,true);this.w.document.removeEventListener('compositionend',this.onEnd,true);}
 }

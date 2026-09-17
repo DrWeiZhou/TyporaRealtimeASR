@@ -1,0 +1,7 @@
+{
+  "llamaServer": "/opt/homebrew/bin/llama-server",
+  "model": "/Users/you/models/Qwen3-ASR-0.6B-Q8_0.gguf",
+  "mmproj": "/Users/you/models/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+  "device": "",
+  "asrEndpoint": "http://127.0.0.1:18081"
+}

@@ -17,7 +17,7 @@ public sealed record OnlineAsrConfig(bool Enabled,string Protocol,string BaseUrl
 
 public sealed class OnlineAsrSettings {
  public static readonly string[] Protocols=["chat","transcriptions"];
- private static readonly ISecretProtector DefaultProtector=new DpapiSecretProtector();
+ private static ISecretProtector DefaultProtector=>PlatformServices.SecretProtector;
  private readonly string file,modeFile;private readonly object gate=new();private readonly ISecretProtector protector;
  private OnlineAsrConfig? cached;private bool loaded;
  public OnlineAsrSettings(string root,ISecretProtector? protector=null){file=Path.Combine(root,"asr-settings.json");modeFile=Path.Combine(root,"asr-mode.json");this.protector=protector??DefaultProtector;}
@@ -34,7 +34,7 @@ public sealed class OnlineAsrSettings {
   c=c with{Protocol=c.Protocol.Trim(),BaseUrl=c.BaseUrl.Trim(),Model=c.Model.Trim(),ApiKey=c.ApiKey.Trim()};
   Validate(c);
   var tmp=file+".tmp";File.WriteAllText(tmp,JsonSerializer.Serialize(protector.Protect(JsonSerializer.Serialize(c))));File.Move(tmp,file,true);
-  // Plain mode flag lets tools/start.ps1 skip the local model without reading secrets.
+  // Plain mode flag lets tools/start.ps1 (tools/mac/start.sh) skip the local model without reading secrets.
   var modeTmp=modeFile+".tmp";File.WriteAllText(modeTmp,JsonSerializer.Serialize(new {online=c.Enabled}));File.Move(modeTmp,modeFile,true);
   cached=c;loaded=true;return c;
  }}

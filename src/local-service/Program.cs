@@ -3,6 +3,26 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using TyporaAsr;
 
+#if TYPORA_MAC
+// Packaging self-test: `TyporaASR Service.app --self-test-capture <seconds> <report.json> [device]` records through the
+// app bundle (so macOS asks for microphone access for this app) and writes device list + sample statistics.
+if(args.Length>=3&&args[0]=="--self-test-capture"){
+    var report=new Dictionary<string,object?>();
+    try{
+        var factory=PlatformServices.CreateAudioCaptureFactory();
+        report["devices"]=factory.EnumerateDevices().Select(d=>new{d.Id,d.Name,d.Kind}).ToList();
+        report["authorization"]=MicrophoneAccess.Status();
+        using var capture=factory.Create();long samples=0;double peak=0;
+        capture.PcmAvailable+=pcm=>{Interlocked.Add(ref samples,pcm.Length);foreach(var v in pcm)peak=Math.Max(peak,Math.Abs(v/32768.0));};
+        capture.Start(args.Length>3?int.Parse(args[3]):-1);
+        await Task.Delay(TimeSpan.FromSeconds(double.Parse(args[1],System.Globalization.CultureInfo.InvariantCulture)));
+        capture.RequestStop();await capture.WaitStoppedAsync(TimeSpan.FromSeconds(5));
+        report["samples"]=samples;report["peak"]=peak;report["ok"]=samples>0;
+    }catch(Exception error){report["ok"]=false;report["error"]=error.ToString();}
+    File.WriteAllText(args[2],JsonSerializer.Serialize(report,new JsonSerializerOptions{WriteIndented=true}));
+    return;
+}
+#endif
 var builder=WebApplication.CreateBuilder(args);
 var root=System.IO.Path.GetFullPath(builder.Configuration["DataRoot"] ?? ".asr");
 Directory.CreateDirectory(root);
@@ -18,7 +38,7 @@ var endpoint=builder.Configuration["AsrEndpoint"] ?? "http://127.0.0.1:18081";
 var asr=new AsrClient(http,endpoint,builder.Configuration["AsrModel"] ?? "qwen3-asr");
 var polishSettings=new PolishSettings(root);
 var storageSettings=new StorageSettings(root);
-var audioFactory=new WasapiAudioCaptureFactory();
+var audioFactory=PlatformServices.CreateAudioCaptureFactory();
 using var onlineHttp=new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}){Timeout=TimeSpan.FromSeconds(65)};
 var onlineAsr=new OnlineAsrSettings(root);
 // Local model by default; the online ASR service when enabled in the panel.
@@ -31,9 +51,31 @@ var leases=new Dictionary<string,(string Owner,DateTime Expires)>(StringComparer
 var sessionGate=new SemaphoreSlim(1,1);
 var app=builder.Build();
 var shuttingDown=false;
+#if TYPORA_MAC
+// Typora for macOS is a WKWebView page (not Electron), so the plugin talks to this service with fetch().
+// Only the Typora page origins may read responses; every request except the bare preflight still needs the bearer token.
+var allowedOrigins=new HashSet<string>(StringComparer.OrdinalIgnoreCase){"null","file://"};
+foreach(var extraOrigin in (builder.Configuration["AllowedOrigins"]??"").Split(',',StringSplitOptions.RemoveEmptyEntries|StringSplitOptions.TrimEntries))allowedOrigins.Add(extraOrigin);
+bool TyporaOrigin(string value)=>allowedOrigins.Contains(value)||value.StartsWith("typora:",StringComparison.OrdinalIgnoreCase)||value.StartsWith("file:",StringComparison.OrdinalIgnoreCase);
+app.Use(async(context,next)=>{
+    var requestOrigin=context.Request.Headers.Origin.ToString();
+    if(requestOrigin.Length>0){
+        if(!TyporaOrigin(requestOrigin)){context.Response.StatusCode=403;return;}
+        context.Response.Headers.AccessControlAllowOrigin=requestOrigin;
+        context.Response.Headers.Vary="Origin";
+        if(HttpMethods.IsOptions(context.Request.Method)){
+            context.Response.Headers.AccessControlAllowMethods="GET, POST";
+            context.Response.Headers.AccessControlAllowHeaders="Authorization, Content-Type, X-ASR-Client";
+            context.Response.Headers.AccessControlMaxAge="600";
+            context.Response.StatusCode=204;return;
+        }
+    }
+    await next();
+});
+#endif
 app.Use(async(context,next)=>{
     if(!CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(context.Request.Headers.Authorization.ToString()),System.Text.Encoding.UTF8.GetBytes("Bearer "+token))) {context.Response.StatusCode=401;return;}
-    // No CORS: authenticated native plugin connections only.
+    // Windows: no CORS (native Node plugin). macOS: CORS limited to Typora page origins above; the token is still required.
     if(shuttingDown && context.Request.Method!="GET" && context.Request.Path!="/shutdown") {context.Response.StatusCode=409;await context.Response.WriteAsJsonAsync(new {error="服务正在终止"});return;}
     try {await next();}
     catch(Exception error) {context.Response.StatusCode=error is ArgumentException?400:409;await context.Response.WriteAsJsonAsync(new {error=error.Message});}
@@ -46,7 +88,7 @@ RecordingSession Owned(string id,HttpContext context) {
     if(!sessions.TryGetValue(id,out var s))throw new ArgumentException("请先恢复会话");
     Claim(s.Path,Client(context));ledger.TouchSession(id);return s;
 }
-app.MapGet("/health",()=>new {status="ok",protocolVersion=2,canShutdown=true,processId=Environment.ProcessId});
+app.MapGet("/health",()=>new {status="ok",protocolVersion=2,canShutdown=true,processId=Environment.ProcessId,platform=PlatformServices.Name});
 app.MapPost("/shutdown",async(HttpContext context)=>{
     await sessionGate.WaitAsync();
     try {
@@ -96,6 +138,37 @@ app.MapPost("/asr/config",async(OnlineAsrRequest request,HttpContext context)=>{
 });
 app.MapPost("/asr/test",async(HttpContext context)=>{var config=onlineAsr.Current()??throw new ArgumentException("请先保存在线 ASR 配置");try{await OnlineAsrClient.Recognize(onlineHttp,config,new short[16000],context.RequestAborted);return Results.Ok(new {ok=true});}catch(Exception error) when(error is HttpRequestException or InvalidDataException){throw new ArgumentException(error.Message);}catch(Exception error) when(error is not OperationCanceledException){throw new ArgumentException("在线 ASR 连接测试失败，请检查地址、模型、密钥与网络");}});
 app.MapGet("/devices",()=>audioFactory.EnumerateDevices().Select(d=>new {id=d.Id,name=d.Name,kind=d.Kind}).ToList());
+#if TYPORA_MAC
+// Typora for macOS saves natively and its page may not send Apple Events to its own app, so the plugin asks this
+// service (its own bundle, with NSAppleEventsUsageDescription) to save the open document with the given file name.
+app.MapPost("/mac/save-document",async(MacSaveRequest request)=>{
+    var name=System.IO.Path.GetFileName(request.Name??"");
+    if(name.Length==0||name.Length>255)throw new ArgumentException("文档名称无效");
+    var psi=new System.Diagnostics.ProcessStartInfo("/usr/bin/osascript"){RedirectStandardOutput=true,RedirectStandardError=true};
+    foreach(var line in new[]{
+        "on run argv",
+        "set target to item 1 of argv",
+        "tell application id \"abnerworks.Typora\"",
+        "set matches to (every document whose name is target)",
+        "if (count of matches) is not 1 then return \"ambiguous:\" & (count of matches)",
+        "save (item 1 of matches)",
+        "end tell",
+        "return \"saved\"",
+        "end run"}){psi.ArgumentList.Add("-e");psi.ArgumentList.Add(line);}
+    psi.ArgumentList.Add(name);
+    using var process=System.Diagnostics.Process.Start(psi)!;
+    var output=process.StandardOutput.ReadToEndAsync();var error=process.StandardError.ReadToEndAsync();
+    using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(60));
+    try{await process.WaitForExitAsync(deadline.Token);}catch(OperationCanceledException){process.Kill();throw new InvalidOperationException("等待 Typora 保存超时（如出现“自动化”授权提示，请允许 TyporaASR Service 控制 Typora）");}
+    var text=(await output).Trim();
+    if(process.ExitCode!=0){
+        var detail=(await error).Trim();
+        throw new InvalidOperationException(detail.Contains("-1743")?"请在“系统设置 → 隐私与安全性 → 自动化”中允许 TyporaASR Service 控制 Typora":"Typora 保存失败："+detail);
+    }
+    if(text.StartsWith("ambiguous:",StringComparison.Ordinal))throw new InvalidOperationException(text=="ambiguous:0"?"Typora 中找不到该文档窗口":"Typora 中打开了多个同名文档，请只保留一个后重试");
+    return Results.Ok(new {saved=text=="saved"});
+});
+#endif
 app.MapGet("/sessions",()=>ledger.Sessions());
 app.MapPost("/sessions",async(StartRequest request,HttpContext context)=>{
     if(!Guid.TryParse(request.SessionId,out _) || !Guid.TryParse(request.DocumentId,out _))throw new ArgumentException("Invalid session/document id");
@@ -136,8 +209,23 @@ app.MapPost("/sessions/{id}/pause",async(string id,HttpContext c)=>{var s=Owned(
 app.MapPost("/sessions/{id}/resume",async(string id,ResumeRequest request,HttpContext c)=>{await sessionGate.WaitAsync();try{if(shuttingDown)throw new InvalidOperationException("服务正在终止");var s=Owned(id,c);if(sessions.Values.Any(other=>other.Id!=id && other.Recording))throw new ArgumentException("另一个会话正在录音");await s.Resume(request.Device);return Results.Ok(s.Status());}finally{sessionGate.Release();}});
 app.MapPost("/sessions/{id}/stop",async(string id,HttpContext c)=>{var s=Owned(id,c);await s.Stop();return Results.Ok(s.Status());});
 app.MapPost("/sessions/{id}/ack",(string id,AckRequest r,HttpContext c)=>{Owned(id,c);ledger.Acknowledge(id,r.EventId,r.State);return Results.Ok();});
+#if TYPORA_MAC
+#pragma warning disable CA1416 // macOS-only block
+// macOS plugin fallback transport (curl through Typora's command bridge) reads the token from this 0600 header file.
+var curlHeaderFile=System.IO.Path.Combine(root,"curl-auth.txt");
+File.WriteAllText(curlHeaderFile,"Authorization: Bearer "+token+"\n");
+File.SetUnixFileMode(curlHeaderFile,UnixFileMode.UserRead|UnixFileMode.UserWrite);
+File.SetUnixFileMode(tokenPath,UnixFileMode.UserRead|UnixFileMode.UserWrite);
+var connection=new {endpoint=$"http://127.0.0.1:{port}",token,protocolVersion=2,curlHeaderFile};
+#else
 var connection=new {endpoint=$"http://127.0.0.1:{port}",token,protocolVersion=2};
-File.WriteAllText(System.IO.Path.Combine(root,"connection.json"),JsonSerializer.Serialize(connection));
+#endif
+var connectionPath=System.IO.Path.Combine(root,"connection.json");
+File.WriteAllText(connectionPath,JsonSerializer.Serialize(connection));
+#if TYPORA_MAC
+File.SetUnixFileMode(connectionPath,UnixFileMode.UserRead|UnixFileMode.UserWrite);
+#pragma warning restore CA1416
+#endif
 Console.WriteLine($"Typora ASR: http://127.0.0.1:{port}; connection file: {System.IO.Path.Combine(root,"connection.json")}");
 var pipelineWorker=polishPipeline.Run(pipelineCancel.Token);
 try {await app.RunAsync();}finally{pipelineCancel.Cancel();await pipelineWorker;foreach(var session in sessions.Values)await session.DisposeAsync();}
@@ -146,4 +234,5 @@ record StartRequest(string SessionId,string DocumentId,string Path,int Device=-1
 record AckRequest(string EventId,string State);
 record ResumeRequest(int Device=-1);
 record StorageRequest(string? RecordDirectory);
+record MacSaveRequest(string? Name);
 record OnlineAsrRequest(bool Enabled,string? Protocol,string? BaseUrl,string? Model,string? ApiKey);
